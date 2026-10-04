@@ -1,0 +1,56 @@
+# Apple Lamp OV3660：第一轮无屏适配
+
+硬件：微雪 ESP32-S3-CAM-OV3660，ESP32-S3R8，16 MB Quad Flash，8 MB Octal PSRAM。
+
+上游：`https://github.com/78/xiaozhi-esp32`，基准 commit
+`0d576d3d4c049c6f55eaf879725dc23e516511b4`（项目版本 2.5.1）。
+本地定制分支：`codex/apple-lamp-ov3660`。SDK：ESP-IDF 6.1。
+
+## 本轮范围
+
+- 独立板型和 OTA 身份 `apple-lamp-ov3660`。
+- 沿用官方微雪 I2C、CH32V003、ES7210/ES8311 和摄像头引脚。
+- 使用基类的 `NoDisplay`，不初始化 SPI LCD、不注册背光。
+- 保留上游扩展 IO 复位／使能时序。
+- 摄像头沿用 RGB565 / QVGA / 双帧缓冲 / PSRAM。
+- 音频沿用上游 ADC 通道布局，但设备与云端 AEC 均关闭。
+- 日志走原生 USB Serial/JTAG；GPIO43/44 未初始化为舵机 UART。
+- BOOT 单击切换对话；启动时单击或运行时长按进入 Wi-Fi 配网。
+- 不加入动作控制、存储、示教、持续视觉或灯光。
+
+板型继承项目默认的 16 MB 双 OTA 分区布局，PSRAM 继承 S3 的 Octal / 80 MHz 配置。
+此阶段不修改动作存储分区。
+
+## Windows 构建
+
+在项目根目录的 ESP-IDF 终端执行：
+
+```powershell
+$env:PYTHONUTF8 = '1'
+$env:CMAKE_NINJA_FORCE_RESPONSE_FILE = '1'
+python scripts/build.py waveshare/apple-lamp-ov3660 --name apple-lamp-ov3660 --language zh-CN
+```
+
+使用 `esp-ver/apple-lamp-firmware.code-workspace` 打开 VS Code，避免通用 CMake 扩展
+自动扫描／配置整个台灯项目。构建和监视使用 ESP-IDF 扩展或上述命令。
+响应文件设置用于规避 Windows 创建进程时的长命令限制，不更改硬件配置。
+
+独立上游仓库位于 `esp-ver/xiaozhi-esp32`；在此目录使用 Git 查看定制提交。
+
+## 分步硬件验证
+
+1. 用 `python -m esptool --chip esp32s3 --port COM8 flash-id` 只读确认硬件。
+2. 无屏固件编译成功后，检查 `sdkconfig` 中的板型、16 MB Flash、Octal PSRAM、USB 控制台和 AEC 关闭设置。
+3. `idf.py -p COM8 flash` 烧录构建产物，再 `idf.py -p COM8 monitor` 查看启动日志。
+   COM8 是本轮检测端口，下次连接后应重新确认。
+4. 先确认 PSRAM、CH32V003、摄像头和音频初始化正常，且不发生循环崩溃。
+5. 连接日志提示的 `Xiaozhi-*` 配网热点，用浏览器进入日志给出的地址；不要把 Wi-Fi 密码写进仓库。
+6. 联网和绑定后，逐项验证播放、录音／语音对话、按需拍照问答。
+   本板需要外接扬声器才能验证听到的声音；串口日志不能替代声学实测。
+
+设备绑定码、配网提示和对话文本由 `NoDisplay` 写入日志。串口监视器按 `Ctrl + ]` 退出。
+
+## 状态记录
+
+本轮构建、硬件检测和启动结果见项目根目录 `APPLE_LAMP_BRINGUP.md`。
+编译通过、初始化通过、真实语音／图片功能通过分别记录。

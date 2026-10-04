@@ -158,6 +158,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_ATK_DNESP32S3M_WIFI
         bool "Alientek ATK-DNESP32S3M Wi-Fi (正点原子)"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_APPLE_LAMP_OV3660
+        bool "Apple Lamp OV3660 (Waveshare ESP32-S3-CAM, no display)"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_BREAD_COMPACT_ESP32
         bool "Bread Compact ESP32 DevKit (面包板)"
         depends on IDF_TARGET_ESP32
