@@ -9,6 +9,7 @@
 #include <driver/i2c_master.h>
 #include <driver/ledc.h>
 #include <esp_log.h>
+#include <lvgl.h>
 
 #define TAG "AppleLampOv3660"
 
@@ -101,6 +102,12 @@ private:
 
 public:
     AppleLampOv3660() : boot_button_(BOOT_BUTTON_GPIO) {
+        // The upstream assets loader still constructs LVGL fonts after WiFi
+        // connects, even with NoDisplay. Initialize its allocator without
+        // creating a panel or starting a display task.
+        if (!lv_is_initialized()) {
+            lv_init();
+        }
         InitializeI2c();
         InitializeExpander();
         InitializeButtons();
