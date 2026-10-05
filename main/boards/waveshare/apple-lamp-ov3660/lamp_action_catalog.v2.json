@@ -1,0 +1,483 @@
+{
+  "protocol_version": "lamp-action/2",
+  "model_version": "lamp-v3-58408b6daaaa",
+  "calibration_version": "tool-v3-preview-1",
+  "execution": "simulation",
+  "mode_targets": {
+    "sit": [
+      "user"
+    ],
+    "stand": [
+      "user",
+      "book"
+    ],
+    "work": [
+      "book"
+    ]
+  },
+  "local_parameters": "device_presets",
+  "mcp_tool_descriptions": {
+    "self.lamp.list_primitives": "查询当前台灯动作、少量表达选项、模式与标定条件；首次使用或能力变化时查询，不要每句话重复查询。",
+    "self.lamp.run_sequence": "执行一个动作或有限动作组。可用于用户明确要求，也可在自然对话中适当配合表达：赞同点头A01、询问歪头B02、否定摇头B01。不要求用户先说动作名称。通常省略 options，使用本地已调参数；不要每句都动。忙或冷却时跳过，不循环重试。对话配动作由宿主附加本轮context。",
+    "self.lamp.get_state": "查询当前模式、任务状态与错误；accepted仅表示受理，不能声称已完成。不要为了配动作阻塞正常语音回答。",
+    "self.lamp.stop": "用户要求停止或发生中断时取消任务；保持姿态，不卸力。停止后不要自动补播旧的对话动作。"
+  },
+  "limits": {
+    "steps": 16,
+    "total_duration_sec": 60,
+    "command_bytes": 24576
+  },
+  "primitives": [
+    {
+      "id": "A01",
+      "name": "点头",
+      "description": "面向对象后相对俯仰点头，表达确认、同意。",
+      "modes": [
+        "sit",
+        "stand",
+        "work"
+      ],
+      "target_required": false,
+      "target_source": "mode_calibration",
+      "conversation_cue": "agreement",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "end_mode": {
+            "type": "string",
+            "enum": [
+              "return_to_reference",
+              "hold_at_end"
+            ],
+            "description": "结束方式；返回动作开始前参考姿态，或留在终点",
+            "default": "return_to_reference"
+          },
+          "repetitions": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5,
+            "default": 2,
+            "description": "通常省略并点头两次，明确强调次数时才覆盖"
+          }
+        }
+      }
+    },
+    {
+      "id": "A02",
+      "name": "摇尾式摆动",
+      "description": "下臂与底座协调左右摆动，表达兴奋。",
+      "modes": [
+        "sit",
+        "stand",
+        "work"
+      ],
+      "target_required": false,
+      "target_source": "mode_calibration",
+      "conversation_cue": "excitement",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "end_mode": {
+            "type": "string",
+            "enum": [
+              "return_to_reference",
+              "hold_at_end"
+            ],
+            "description": "结束方式；返回动作开始前参考姿态，或留在终点",
+            "default": "return_to_reference"
+          }
+        }
+      }
+    },
+    {
+      "id": "A03",
+      "name": "低头",
+      "description": "灯头缓慢下垂并保持，区别于循环点头。",
+      "modes": [
+        "sit",
+        "stand",
+        "work"
+      ],
+      "target_required": false,
+      "target_source": "mode_calibration",
+      "conversation_cue": "regret",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "end_mode": {
+            "type": "string",
+            "enum": [
+              "return_to_reference",
+              "hold_at_end"
+            ],
+            "description": "结束方式；返回动作开始前参考姿态，或留在终点",
+            "default": "hold_at_end"
+          }
+        }
+      }
+    },
+    {
+      "id": "A04",
+      "name": "坐下式收拢",
+      "description": "肩肘折叠形成紧凑休息姿态，底座固定。",
+      "modes": [
+        "sit",
+        "stand",
+        "work"
+      ],
+      "target_required": false,
+      "target_source": "mode_calibration",
+      "conversation_cue": null,
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    },
+    {
+      "id": "A09",
+      "name": "注视",
+      "description": "注视轴指向目标并保持，支持快照与连续跟踪。",
+      "modes": [
+        "sit",
+        "stand",
+        "work"
+      ],
+      "target_required": true,
+      "target_source": "mode_calibration",
+      "conversation_cue": null,
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "end_mode": {
+            "type": "string",
+            "enum": [
+              "return_to_reference",
+              "hold_at_end"
+            ],
+            "description": "结束方式；返回动作开始前参考姿态，或留在终点",
+            "default": "hold_at_end"
+          }
+        }
+      }
+    },
+    {
+      "id": "A10",
+      "name": "聚光指示",
+      "description": "注视目标并开灯，可保持照明。",
+      "modes": [
+        "sit",
+        "stand",
+        "work"
+      ],
+      "target_required": true,
+      "target_source": "mode_calibration",
+      "conversation_cue": null,
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "end_mode": {
+            "type": "string",
+            "enum": [
+              "return_to_reference",
+              "hold_at_end"
+            ],
+            "description": "结束方式；返回动作开始前参考姿态，或留在终点",
+            "default": "hold_at_end"
+          },
+          "hold_mode": {
+            "type": "string",
+            "enum": [
+              "timed",
+              "holding"
+            ],
+            "description": "短暂指示或持续照明；holding 仅可单独 execute，需 end_lighting",
+            "default": "timed"
+          }
+        }
+      }
+    },
+    {
+      "id": "A11",
+      "name": "忽视／转开",
+      "description": "相对目标方向转开并保持，不改变距离。",
+      "modes": [
+        "sit",
+        "stand",
+        "work"
+      ],
+      "target_required": true,
+      "target_source": "mode_calibration",
+      "conversation_cue": null,
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "end_mode": {
+            "type": "string",
+            "enum": [
+              "return_to_reference",
+              "hold_at_end"
+            ],
+            "description": "结束方式；返回动作开始前参考姿态，或留在终点",
+            "default": "hold_at_end"
+          }
+        }
+      }
+    },
+    {
+      "id": "A13",
+      "name": "靠近",
+      "description": "灯头与目标距离实际缩短，底座不移动。",
+      "modes": [
+        "sit",
+        "stand",
+        "work"
+      ],
+      "target_required": true,
+      "target_source": "mode_calibration",
+      "conversation_cue": null,
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "end_mode": {
+            "type": "string",
+            "enum": [
+              "return_to_reference",
+              "hold_at_end"
+            ],
+            "description": "结束方式；返回动作开始前参考姿态，或留在终点",
+            "default": "hold_at_end"
+          }
+        }
+      }
+    },
+    {
+      "id": "A14",
+      "name": "避开",
+      "description": "灯头远离对象，可附带转开。",
+      "modes": [
+        "sit",
+        "stand",
+        "work"
+      ],
+      "target_required": true,
+      "target_source": "mode_calibration",
+      "conversation_cue": null,
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "end_mode": {
+            "type": "string",
+            "enum": [
+              "return_to_reference",
+              "hold_at_end"
+            ],
+            "description": "结束方式；返回动作开始前参考姿态，或留在终点",
+            "default": "hold_at_end"
+          },
+          "look_away": {
+            "type": "string",
+            "enum": [
+              "none",
+              "small",
+              "medium",
+              "large"
+            ],
+            "description": "退让后的附加转头程度；通常 none，害怕或惊讶只后退仍看着对方；明确排斥才转开",
+            "default": "none"
+          }
+        }
+      }
+    },
+    {
+      "id": "A15",
+      "name": "注意力切换",
+      "description": "在两个以上目标之间依次看向并停留。",
+      "modes": [
+        "stand"
+      ],
+      "target_required": false,
+      "target_source": "mode_calibration",
+      "conversation_cue": null,
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "end_mode": {
+            "type": "string",
+            "enum": [
+              "return_to_reference",
+              "hold_at_end"
+            ],
+            "description": "结束方式；返回动作开始前参考姿态，或留在终点",
+            "default": "hold_at_end"
+          }
+        }
+      }
+    },
+    {
+      "id": "A16",
+      "name": "强调",
+      "description": "面向目标做小幅重复指示，可同步有限灯光增强。",
+      "modes": [
+        "sit",
+        "stand",
+        "work"
+      ],
+      "target_required": false,
+      "target_source": "mode_calibration",
+      "conversation_cue": "emphasis",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "end_mode": {
+            "type": "string",
+            "enum": [
+              "return_to_reference",
+              "hold_at_end"
+            ],
+            "description": "结束方式；返回动作开始前参考姿态，或留在终点",
+            "default": "return_to_reference"
+          }
+        }
+      }
+    },
+    {
+      "id": "B01",
+      "name": "摇头",
+      "description": "相对目标方向左右摆动，表达否定或失败反馈。",
+      "modes": [
+        "sit",
+        "stand",
+        "work"
+      ],
+      "target_required": false,
+      "target_source": "mode_calibration",
+      "conversation_cue": "denial",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "end_mode": {
+            "type": "string",
+            "enum": [
+              "return_to_reference",
+              "hold_at_end"
+            ],
+            "description": "结束方式；返回动作开始前参考姿态，或留在终点",
+            "default": "return_to_reference"
+          }
+        }
+      }
+    },
+    {
+      "id": "B02",
+      "name": "歪头／侧倾",
+      "description": "围绕面向目标的参考姿态侧倾，表达好奇。",
+      "modes": [
+        "sit",
+        "stand",
+        "work"
+      ],
+      "target_required": false,
+      "target_source": "mode_calibration",
+      "conversation_cue": "question",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "end_mode": {
+            "type": "string",
+            "enum": [
+              "return_to_reference",
+              "hold_at_end"
+            ],
+            "description": "结束方式；返回动作开始前参考姿态，或留在终点",
+            "default": "return_to_reference"
+          }
+        }
+      }
+    }
+  ],
+  "actions": [
+    {
+      "action_id": "set_mode",
+      "fields": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "sit",
+            "stand",
+            "work"
+          ],
+          "description": "标准姿态",
+          "default": "stand"
+        }
+      }
+    },
+    {
+      "action_id": "restore_home",
+      "fields": {}
+    },
+    {
+      "action_id": "adjust_pose",
+      "fields": {
+        "direction": {
+          "type": "string",
+          "enum": [
+            "up",
+            "down",
+            "yaw_positive",
+            "yaw_negative"
+          ],
+          "description": "抬头／低头；转向为机器人 URDF 正负方向，用户左右由上游转换",
+          "default": "up"
+        },
+        "size": {
+          "type": "string",
+          "enum": [
+            "small",
+            "medium",
+            "large"
+          ],
+          "description": "微调程度",
+          "default": "small"
+        }
+      }
+    },
+    {
+      "action_id": "gaze_calibrated",
+      "fields": {
+        "target_id": {
+          "type": "string",
+          "enum": [
+            "user",
+            "book"
+          ],
+          "description": "当前模式已标定目标",
+          "default": "user"
+        }
+      }
+    },
+    {
+      "action_id": "wait",
+      "fields": {
+        "duration_sec": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10,
+          "description": "等待秒数；唯一向模型开放的连续时长"
+        }
+      }
+    }
+  ]
+}
