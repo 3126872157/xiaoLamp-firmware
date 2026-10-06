@@ -23,7 +23,7 @@ def validate_role(image: bytes, role: str, sdk: str):
         if other != role and other_marker in image:
             raise ValueError("Binary contains the opposite application role")
     expected_local = role == "local-readonly"
-    for symbol in ("APPLE_LAMP_LOCAL_EXECUTOR", "APPLE_LAMP_UART_PROBE"):
+    for symbol in ("APPLE_LAMP_LOCAL_EXECUTOR", "APPLE_LAMP_UART_PROBE", "COMPILER_CXX_EXCEPTIONS"):
         if (f"CONFIG_{symbol}=y" in sdk.splitlines()) != expected_local:
             raise ValueError(f"Active configuration does not match role: {symbol}")
 
@@ -36,16 +36,17 @@ def archive(role: str):
     digest = hashlib.sha256(image).hexdigest()
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     output = ROOT / "artifacts/lamp" / role / (commit[:8] + "-" + digest[:12])
-    output.mkdir(parents=True, exist_ok=True)
     files = []
+    sources = []
     for address, relative in args["flash_files"].items():
         source = (build / relative).resolve()
         if not source.is_relative_to(build.resolve()) or not source.is_file():
             raise ValueError("Unexpected flash image path")
-        target = output / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
-        files.append({"address": address, "file": relative, "sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
+        target = (output / relative).resolve()
+        if not target.is_relative_to(output.resolve()):
+            raise ValueError("Unexpected archive image path")
+        sources.append((source, target))
+        files.append({"address": address, "file": relative, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()})
     manifest = {"role": role, "board_name": ROLES[role][0], "git_commit": commit,
                 "worktree_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
                 "app_sha256": digest, "motion_enabled": False,
@@ -54,6 +55,16 @@ def archive(role: str):
     manifest_path = output / "manifest.json"
     if manifest_path.exists() and json.loads(manifest_path.read_text(encoding="utf-8")) != manifest:
         raise ValueError("An immutable build record already exists with different metadata")
+    if manifest_path.exists():
+        for item in files:
+            target = output / item["file"]
+            if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != item["sha256"]:
+                raise ValueError("Existing archived image checksum mismatch; refusing to repair in place")
+        return manifest_path
+    output.mkdir(parents=True, exist_ok=True)
+    for source, target in sources:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n")
     return manifest_path
 

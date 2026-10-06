@@ -5,6 +5,7 @@
 #include <esp_timer.h>
 #include <cstdio>
 #include "lamp_bus_protocol.h"
+#include "lamp_pose_model.h"
 #include "lamp_protocol.h"
 namespace {
 constexpr int64_t kFreshUs = 1500000;
@@ -18,6 +19,13 @@ std::string Failure(const char* code, const char* message) {
 }
 }  // namespace
 LampLocalExecutor::LampLocalExecutor() {
+#if CONFIG_APPLE_LAMP_LOCAL_EXECUTOR
+    auto configuration = lamp::pose::ParseConfiguration(lamp::pose::kDeviceConfiguration);
+    if (configuration)
+        configuration_ = std::move(*configuration);
+    else
+        configuration_error_ = configuration.error();
+#endif
 #if CONFIG_APPLE_LAMP_LOCAL_EXECUTOR && CONFIG_APPLE_LAMP_UART_PROBE
 #if !CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG || !CONFIG_ESP_CONSOLE_SECONDARY_NONE
 #error "Local lamp UART0 requires native USB console and no secondary UART console"
@@ -81,6 +89,11 @@ std::string LampLocalExecutor::State() {
     cJSON_AddStringToObject(root.get(), "executor", "local_uart_read_only");
     cJSON_AddStringToObject(root.get(), "completion_basis", "hardware_feedback");
     cJSON_AddBoolToObject(root.get(), "motion_enabled", false);
+    cJSON_AddBoolToObject(root.get(), "configuration_loaded", configuration_.has_value());
+    cJSON_AddStringToObject(root.get(), "software_stage", "portable_planner_no_hardware_player");
+    cJSON_AddStringToObject(root.get(), "model_version", lamp::pose::kModel);
+    if (!configuration_error_.empty())
+        cJSON_AddStringToObject(root.get(), "configuration_error", configuration_error_.c_str());
     cJSON_AddBoolToObject(root.get(), "uart_enabled", uart_enabled_);
     bool all_fresh = uart_enabled_;
     auto* feedback = cJSON_AddArrayToObject(root.get(), "servos");

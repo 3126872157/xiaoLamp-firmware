@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include "lamp_bridge.h"
+#include "lamp_pose_plan.h"
 class LampLocalExecutor final : public LampActionExecutor {
 public:
     LampLocalExecutor();
@@ -20,6 +21,8 @@ private:
     };
     std::mutex mutex_;
     std::array<Servo, 5> servos_;
+    std::optional<lamp::pose::Configuration> configuration_;
+    std::string configuration_error_;
     uint32_t counter_ = 0;
     bool uart_enabled_ = false;
     std::string setup_error_;
