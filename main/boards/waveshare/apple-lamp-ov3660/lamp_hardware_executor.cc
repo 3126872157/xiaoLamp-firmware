@@ -59,6 +59,37 @@ CJsonUniquePtr Canonical(const cJSON* value) {
     return CJsonUniquePtr(cJSON_Duplicate(value, true));
 }
 constexpr const char* Modes[] = {"sit", "stand", "work"};
+std::string TeachingBinding(const cJSON* full) {
+    CJsonUniquePtr binding(cJSON_CreateObject());
+    for (const auto* key : {"model_version", "calibration_version"})
+        cJSON_AddItemToObject(binding.get(), key, cJSON_Duplicate(Item(full, key), true));
+    cJSON_AddItemToObject(binding.get(), "servos",
+                          cJSON_Duplicate(Item(Item(full, "hardware"), "servos"), true));
+    cJSON_AddStringToObject(binding.get(), "placement",
+                            lamp::Text(Item(full, "profiles"), "placementId").c_str());
+    auto* homes = cJSON_AddObjectToObject(binding.get(), "homes");
+    for (const auto* mode : Modes)
+        cJSON_AddItemToObject(
+            homes, mode,
+            cJSON_Duplicate(Item(Item(Item(Item(full, "homes"), "homes"), mode), "pose"), true));
+    return Hash(lamp::Encode(Canonical(binding.get()).get()));
+}
+CJsonUniquePtr TeachingPayload(const cJSON* full, int mode) {
+    CJsonUniquePtr saved(cJSON_CreateObject());
+    cJSON_AddStringToObject(saved.get(), "format", "lamp-native-teaching/1");
+    cJSON_AddStringToObject(saved.get(), "model_version", lamp::pose::kModel);
+    cJSON_AddStringToObject(saved.get(), "binding", TeachingBinding(full).c_str());
+    cJSON_AddNumberToObject(saved.get(), "runtime_mode", mode);
+    auto* targets = cJSON_AddObjectToObject(saved.get(), "targets");
+    for (const auto* m : Modes) {
+        auto* to = cJSON_AddObjectToObject(targets, m);
+        const auto* from = Item(Item(Item(Item(full, "profiles"), "modes"), m), "targets");
+        for (auto* t = from ? from->child : nullptr; t; t = t->next)
+            if (lamp::Text(t, "updatedAt").starts_with("uptime:") && !Item(t, "sceneSignature"))
+                cJSON_AddItemToObject(to, t->string, cJSON_Duplicate(t, true));
+    }
+    return saved;
+}
 constexpr uint8_t Lo(unsigned v) { return v & 255; }
 constexpr uint8_t Hi(unsigned v) { return (v >> 8) & 255; }
 }  // namespace
@@ -104,7 +135,52 @@ void LampHardwareExecutor::LoadStored() {
         return;
     }
     data.resize(size);
-    auto cfg = lamp::pose::ParseConfiguration(data);
+    CJsonUniquePtr saved(cJSON_Parse(data.c_str()));
+    CJsonUniquePtr compact;
+    if (lamp::Text(saved.get(), "format") == "lamp-device/1") {
+        auto legacy = lamp::pose::ParseConfiguration(data);
+        if (legacy)
+            compact = TeachingPayload(legacy->source.get(),
+                                      cJSON_IsNumber(Item(saved.get(), "runtime_mode"))
+                                          ? Item(saved.get(), "runtime_mode")->valueint
+                                          : 0);
+    } else if (lamp::Text(saved.get(), "format") == "lamp-native-teaching/1")
+        compact = std::move(saved);
+    if (!configuration_ || !compact || lamp::Text(compact.get(), "binding").empty() ||
+        lamp::Text(compact.get(), "binding") != TeachingBinding(configuration_->source.get())) {
+        configuration_.reset();
+        configuration_error_ =
+            "Stored teaching/model/home/mapping binding mismatch; reset teaching before changing "
+            "mapping";
+        return;
+    }
+    auto* saved_targets = Item(compact.get(), "targets");
+    bool valid = cJSON_IsObject(saved_targets) && cJSON_GetArraySize(saved_targets) <= 3;
+    CJsonUniquePtr merged(cJSON_Duplicate(configuration_->source.get(), true));
+    for (auto* m = saved_targets ? saved_targets->child : nullptr; m; m = m->next) {
+        auto* profile =
+            const_cast<cJSON*>(Item(Item(Item(merged.get(), "profiles"), "modes"), m->string));
+        if (!profile || !cJSON_IsObject(m) || cJSON_GetArraySize(m) > 2) {
+            valid = false;
+            break;
+        }
+        auto* to = const_cast<cJSON*>(Item(profile, "targets"));
+        for (auto* t = m->child; t; t = t->next) {
+            cJSON_DeleteItemFromObjectCaseSensitive(to, t->string);
+            cJSON_AddItemToObject(to, t->string, cJSON_Duplicate(t, true));
+        }
+    }
+    const auto* logical = Item(compact.get(), "runtime_mode");
+    valid &= cJSON_IsNumber(logical) && logical->valuedouble == logical->valueint &&
+             logical->valueint >= 0 && logical->valueint < 3;
+    if (!valid) {
+        configuration_.reset();
+        configuration_error_ = "Invalid stored teaching schema";
+        return;
+    }
+    cJSON_DeleteItemFromObjectCaseSensitive(merged.get(), "runtime_mode");
+    cJSON_AddNumberToObject(merged.get(), "runtime_mode", logical->valueint);
+    auto cfg = lamp::pose::ParseConfiguration(lamp::Encode(merged.get()));
     if (!cfg) {
         configuration_.reset();
         configuration_error_ = cfg.error();
@@ -431,7 +507,13 @@ bool LampHardwareExecutor::RecordCalibration(const std::string& target, uint32_t
     nvs_handle_t h;
     if (nvs_open("lamp_native", NVS_READWRITE, &h) != ESP_OK)
         return false;
-    auto result = nvs_set_blob(h, "device_v1", data.data(), data.size());
+    auto payload = TeachingPayload(candidate.get(), mode);
+    const auto compact = lamp::Encode(payload.get());
+    if (compact.size() > 2048 || lamp::Text(payload.get(), "binding").empty()) {
+        nvs_close(h);
+        return false;
+    }
+    auto result = nvs_set_blob(h, "device_v1", compact.data(), compact.size());
     if (result == ESP_OK)
         result = nvs_commit(h);
     nvs_close(h);

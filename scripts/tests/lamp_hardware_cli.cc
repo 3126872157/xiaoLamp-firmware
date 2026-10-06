@@ -10,6 +10,7 @@
 #include "lamp_bus_protocol.h"
 #include "lamp_hardware_executor.h"
 #include "lamp_hardware_platform.h"
+#include "lamp_pose_model.h"
 namespace {
 std::mutex bus_mutex;
 std::deque<uint8_t> rx;
@@ -261,6 +262,8 @@ int main() {
     Submit(*e, "teach", "record_calibration", R"({"target_id":"user"})");
     assert(Wait(*e, "teach") == "completed");
     assert(!saved.empty());
+    assert(saved.size() < 2048);
+    assert(lamp::Text(Json(saved).get(), "format") == "lamp-native-teaching/1");
     StopTasks();
     auto* reboot = new LampHardwareExecutor();
     auto state = Json(reboot->State());
@@ -315,6 +318,23 @@ int main() {
     assert(saved == old);
     StopTasks();
     nvs_fail = false;
+    // Earlier local firmware saved the whole configuration; keep its native teaching only.
+    auto compact = Json(saved);
+    auto legacy = Json(lamp::pose::kDeviceConfiguration);
+    auto* legacy_targets = const_cast<cJSON*>(
+        Item(Item(Item(Item(legacy.get(), "profiles"), "modes"), "sit"), "targets"));
+    cJSON_DeleteItemFromObjectCaseSensitive(legacy_targets, "user");
+    cJSON_AddItemToObject(
+        legacy_targets, "user",
+        cJSON_Duplicate(Item(Item(Item(compact.get(), "targets"), "sit"), "user"), true));
+    cJSON_AddNumberToObject(legacy.get(), "runtime_mode", 0);
+    saved = lamp::Encode(legacy.get());
+    auto* migrated = new LampHardwareExecutor();
+    assert(migrated->Ready());
+    auto migrated_state = Json(migrated->State());
+    assert(cJSON_GetArraySize(Item(Item(migrated_state.get(), "calibrated_targets"), "sit")) == 1);
+    assert(cJSON_IsFalse(Item(migrated_state.get(), "motion_enabled")));
+    StopTasks();
     saved = "{}";
     auto* bad = new LampHardwareExecutor();
     assert(!bad->Ready());
