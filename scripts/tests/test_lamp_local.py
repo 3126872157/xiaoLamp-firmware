@@ -54,9 +54,11 @@ class LocalBusTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("lamp_roles", ROOT / "scripts/build_lamp_variant.py")
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
         for role, (name, marker) in module.ROLES.items():
-            sdk = "CONFIG_APPLE_LAMP_LOCAL_EXECUTOR=y\nCONFIG_APPLE_LAMP_UART_PROBE=y\nCONFIG_COMPILER_CXX_EXCEPTIONS=y" if role == "local-readonly" else ""
+            sdk = "CONFIG_APPLE_LAMP_LOCAL_EXECUTOR=y\nCONFIG_APPLE_LAMP_UART_PROBE=y\nCONFIG_COMPILER_CXX_EXCEPTIONS=y" if role != "simulator" else ""
+            if role == "local-hardware": sdk += "\nCONFIG_APPLE_LAMP_HARDWARE_MOTION=y"
             image = name.encode() + b"\0" + marker
             module.validate_role(image, role, sdk)
-            other = "simulator" if role == "local-readonly" else "local-readonly"
-            with self.assertRaises(ValueError): module.validate_role(image, other, sdk)
-            with self.assertRaises(ValueError): module.validate_role(image + module.ROLES[other][1], role, sdk)
+            for other in module.ROLES:
+                if other == role: continue
+                with self.assertRaises(ValueError): module.validate_role(image, other, sdk)
+                with self.assertRaises(ValueError): module.validate_role(image + module.ROLES[other][1], role, sdk)

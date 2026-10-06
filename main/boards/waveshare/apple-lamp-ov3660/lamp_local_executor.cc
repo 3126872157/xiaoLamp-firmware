@@ -18,7 +18,7 @@ std::string Failure(const char* code, const char* message) {
     return lamp::Encode(root.get());
 }
 }  // namespace
-LampLocalExecutor::LampLocalExecutor() {
+LampLocalExecutor::LampLocalExecutor(bool start_worker) {
 #if CONFIG_APPLE_LAMP_LOCAL_EXECUTOR
     auto configuration = lamp::pose::ParseConfiguration(lamp::pose::kDeviceConfiguration);
     if (configuration)
@@ -48,14 +48,14 @@ LampLocalExecutor::LampLocalExecutor() {
         return;
     }
     TaskHandle_t worker = nullptr;
-    if (xTaskCreate(Run, "lamp_readonly", 6144, this, 1, &worker) != pdPASS) {
+    if (start_worker && xTaskCreate(Run, "lamp_readonly", 6144, this, 1, &worker) != pdPASS) {
         setup_error_ = "Could not start bounded read-only task";
         uart_driver_delete(UART_NUM_0);
         return;
     }
     uart_enabled_ = true;
-    ESP_LOGI("LampLocal",
-             "LOCAL READ-ONLY UART0 TX43/RX44 115200; movement and torque writes disabled");
+    ESP_LOGI("LampLocal", "UART0 TX43/RX44 115200; owner=%s",
+             start_worker ? "read-only" : "hardware player");
 #else
     setup_error_ = "UART probe is disabled in this firmware variant";
 #endif
@@ -133,14 +133,14 @@ void LampLocalExecutor::Run(void* self) { static_cast<LampLocalExecutor*>(self)-
 bool LampLocalExecutor::Read(unsigned index, uint8_t command) {
 #if CONFIG_APPLE_LAMP_LOCAL_EXECUTOR && CONFIG_APPLE_LAMP_UART_PROBE
     const auto request = lamp::bus::ReadRequest(index + 1, command);
-    if (!request)
+    if (!request || ReadCancelled())
         return false;
     uart_flush_input(UART_NUM_0);
     bool ok = uart_write_bytes(UART_NUM_0, request->data(), request->size()) ==
               static_cast<int>(request->size());
     lamp::bus::Parser parser;
     const auto deadline = esp_timer_get_time() + 400000;
-    while (ok && esp_timer_get_time() < deadline) {
+    while (ok && !ReadCancelled() && esp_timer_get_time() < deadline) {
         uint8_t bytes[128];
         const int count = uart_read_bytes(UART_NUM_0, bytes, sizeof(bytes), pdMS_TO_TICKS(20));
         if (count < 0)
@@ -178,6 +178,8 @@ bool LampLocalExecutor::Read(unsigned index, uint8_t command) {
             return true;
         }
     }
+    if (ReadCancelled())
+        return false;
     std::lock_guard lock(mutex_);
     auto& s = servos_[index];
     ++s.failures;

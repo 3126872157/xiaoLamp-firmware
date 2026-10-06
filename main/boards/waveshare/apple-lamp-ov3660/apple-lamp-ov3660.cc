@@ -5,6 +5,7 @@
 #include "custom_io_expander_ch32v003.h"
 #include "esp32_camera.h"
 #include "lamp_bridge.h"
+#include "lamp_hardware_executor.h"
 #include "lamp_local_executor.h"
 #include "wifi_board.h"
 
@@ -115,7 +116,10 @@ public:
         InitializeExpander();
         InitializeButtons();
         InitializeCamera();
-#if CONFIG_APPLE_LAMP_LOCAL_EXECUTOR
+#if CONFIG_APPLE_LAMP_HARDWARE_MOTION
+        lamp_executor_ = new LampHardwareExecutor();
+        ESP_LOGI(TAG, "Firmware role: LOCAL-HARDWARE; operator enable required, no startup motion");
+#elif CONFIG_APPLE_LAMP_LOCAL_EXECUTOR
         lamp_executor_ = new LampLocalExecutor();
         ESP_LOGI(TAG, "Firmware role: LOCAL-READONLY; no browser bridge, no movement writes");
 #else

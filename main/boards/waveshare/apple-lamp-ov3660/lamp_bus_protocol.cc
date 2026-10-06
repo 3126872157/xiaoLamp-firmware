@@ -1,5 +1,21 @@
 #include "lamp_bus_protocol.h"
 namespace lamp::bus {
+std::expected<std::vector<uint8_t>, std::string> WriteRequest(uint8_t id, uint8_t cmd,
+                                                              std::span<const uint8_t> p) {
+    if (id < 1 || id > 5 ||
+        !((cmd == 1 && p.size() == 4 && Word(p) <= 1000 && Word(p.subspan(2)) <= 30000) ||
+          (cmd == 12 && p.empty()) ||
+          (cmd == 29 && p.size() == 4 && p[0] == 0 && p[1] == 0 && p[2] == 0 && p[3] == 0) ||
+          (cmd == 31 && p.size() == 1 && p[0] <= 1)))
+        return std::unexpected("Unsupported hardware write; no presets/broadcast/motor mode");
+    std::vector<uint8_t> bytes = {0x55, 0x55, id, static_cast<uint8_t>(p.size() + 3), cmd};
+    bytes.insert(bytes.end(), p.begin(), p.end());
+    uint8_t sum = 0;
+    for (size_t i = 2; i < bytes.size(); i++)
+        sum += bytes[i];
+    bytes.push_back(static_cast<uint8_t>(~sum));
+    return bytes;
+}
 size_t ReadLength(uint8_t command) {
     switch (command) {
         case 14:

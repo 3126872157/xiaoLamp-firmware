@@ -12,6 +12,8 @@ struct Packet {
 };
 size_t ReadLength(uint8_t command);
 std::expected<std::vector<uint8_t>, std::string> ReadRequest(uint8_t id, uint8_t command);
+std::expected<std::vector<uint8_t>, std::string> WriteRequest(uint8_t id, uint8_t command,
+                                                              std::span<const uint8_t> parameters);
 class Parser {
     std::deque<uint8_t> bytes_;
 

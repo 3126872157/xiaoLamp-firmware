@@ -2,6 +2,17 @@
 #include "lamp_bus_protocol.h"
 using namespace lamp::bus;
 int main() {
+    const uint8_t move[] = {0xf4, 1, 0xe8, 3};
+    const auto written = WriteRequest(1, 1, move);
+    assert(written &&
+           *written == std::vector<uint8_t>({0x55, 0x55, 1, 7, 1, 0xf4, 1, 0xe8, 3, 0x16}));
+    assert(!WriteRequest(254, 1, move));
+    for (auto cmd : {7, 8, 11})
+        assert(!WriteRequest(1, cmd, move));
+    const uint8_t outside[] = {0xe9, 3, 0, 0};
+    assert(!WriteRequest(1, 1, outside));
+    const uint8_t motor[] = {1, 0, 0, 0};
+    assert(!WriteRequest(1, 29, motor));
     const auto request = ReadRequest(1, 28);
     assert(request && *request == std::vector<uint8_t>({0x55, 0x55, 1, 3, 28, 0xdf}));
     for (unsigned cmd = 0; cmd < 256; cmd++) {

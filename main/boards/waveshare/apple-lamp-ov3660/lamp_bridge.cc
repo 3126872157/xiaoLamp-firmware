@@ -563,6 +563,21 @@ void RegisterLampTools(LampActionExecutor& executor) {
                 cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "execution",
                                                        cJSON_CreateString("hardware_read_only"));
             }
+            if (role == "local_uart_hardware") {
+                auto* primitives = cJSON_GetObjectItemCaseSensitive(catalog.get(), "primitives");
+                for (int i = cJSON_GetArraySize(primitives) - 1; i >= 0; --i)
+                    if (lamp::Text(cJSON_GetArrayItem(primitives, i), "id") == "A10")
+                        cJSON_DeleteItemFromArray(primitives, i);
+                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "total",
+                                                       cJSON_CreateNumber(12));
+                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "execution",
+                                                       cJSON_CreateString("hardware_feedback"));
+                cJSON_AddBoolToObject(catalog.get(), "requires_operator_enable",
+                                      cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(
+                                          state.get(), "requires_operator_enable")));
+                cJSON_AddStringToObject(catalog.get(), "lighting",
+                                        "No physical light driver; A10 unavailable, A16 body only");
+            }
             return lamp::Encode(catalog.get());
         });
     mcp.AddTool(
