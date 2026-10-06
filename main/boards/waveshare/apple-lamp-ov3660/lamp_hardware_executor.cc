@@ -90,11 +90,35 @@ CJsonUniquePtr TeachingPayload(const cJSON* full, int mode) {
     }
     return saved;
 }
+std::expected<lamp::pose::Configuration, std::string> Installation(const cJSON* base,
+                                                                   const cJSON* mapping) {
+    if (!cJSON_IsArray(mapping) || cJSON_GetArraySize(mapping) != 5)
+        return std::unexpected("Expected five installation mappings");
+    CJsonUniquePtr candidate(cJSON_Duplicate(base, true));
+    auto* servos = const_cast<cJSON*>(Item(Item(candidate.get(), "hardware"), "servos"));
+    for (unsigned i = 0; i < 5; i++) {
+        const auto* row = cJSON_GetArrayItem(mapping, i);
+        const auto *direction = Item(row, "direction"), *zero = Item(row, "zero_ticks");
+        if (!cJSON_IsObject(row) || cJSON_GetArraySize(row) != 2 || !cJSON_IsNumber(direction) ||
+            !cJSON_IsNumber(zero))
+            return std::unexpected("Only numeric direction and zero_ticks may be changed");
+        auto* servo = cJSON_GetArrayItem(servos, i);
+        cJSON_ReplaceItemInObjectCaseSensitive(servo, "direction",
+                                               cJSON_Duplicate(direction, true));
+        cJSON_ReplaceItemInObjectCaseSensitive(servo, "zero_ticks", cJSON_Duplicate(zero, true));
+    }
+    auto* modes = const_cast<cJSON*>(Item(Item(candidate.get(), "profiles"), "modes"));
+    for (auto* m = modes->child; m; m = m->next)
+        cJSON_ReplaceItemInObjectCaseSensitive(m, "targets", cJSON_CreateObject());
+    return lamp::pose::ParseConfiguration(lamp::Encode(candidate.get()));
+}
 constexpr uint8_t Lo(unsigned v) { return v & 255; }
 constexpr uint8_t Hi(unsigned v) { return (v >> 8) & 255; }
 }  // namespace
 LampHardwareExecutor::LampHardwareExecutor() : LampLocalExecutor(false) {
-    LoadStored();
+    LoadInstallation();
+    if (configuration_)
+        LoadStored();
     TaskHandle_t worker = nullptr;
     if (uart_enabled_ &&
         xTaskCreate(RunHardware, "lamp_hardware", 12288, this, 1, &worker) == pdPASS)
@@ -191,6 +215,212 @@ void LampHardwareExecutor::LoadStored() {
     if (cJSON_IsNumber(saved_mode) && saved_mode->valueint >= 0 && saved_mode->valueint < 3)
         mode_ = saved_mode->valueint;
 }
+void LampHardwareExecutor::LoadInstallation() {
+    nvs_handle_t h;
+    const auto opened = nvs_open("lamp_native", NVS_READONLY, &h);
+    if (opened == ESP_ERR_NVS_NOT_FOUND)
+        return;
+    if (opened != ESP_OK) {
+        configuration_.reset();
+        configuration_error_ = "Installation NVS open failed";
+        return;
+    }
+    size_t size = 0;
+    auto err = nvs_get_blob(h, "install_v1", nullptr, &size);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        nvs_close(h);
+        return;
+    }
+    if (err != ESP_OK || size == 0 || size > 2048) {
+        nvs_close(h);
+        configuration_.reset();
+        configuration_error_ = "Invalid installation storage";
+        return;
+    }
+    std::string data(size, '\0');
+    err = nvs_get_blob(h, "install_v1", data.data(), &size);
+    nvs_close(h);
+    CJsonUniquePtr root(cJSON_Parse(data.c_str()));
+    if (err != ESP_OK || lamp::Text(root.get(), "format") != "lamp-installation/1" ||
+        lamp::Text(root.get(), "model_version") != lamp::pose::kModel ||
+        lamp::Text(root.get(), "calibration_version") != lamp::pose::kCalibration ||
+        !configuration_) {
+        configuration_.reset();
+        configuration_error_ = "Installation version mismatch";
+        return;
+    }
+    auto next = Installation(configuration_->source.get(), Item(root.get(), "mapping"));
+    if (!next) {
+        configuration_.reset();
+        configuration_error_ = next.error();
+        return;
+    }
+    configuration_ = std::move(*next);
+}
+bool LampHardwareExecutor::SaveInstallation(const cJSON* mapping) {
+    for (unsigned i = 0; i < 5; i++)
+        if (!Read(i, 28) || !Read(i, 32) || servos_[i].torque != 0 || !Read(i, 21))
+            return false;
+    CJsonUniquePtr fallback(cJSON_Parse(lamp::pose::kDeviceConfiguration));
+    auto next =
+        Installation(configuration_ ? configuration_->source.get() : fallback.get(), mapping);
+    if (!next)
+        return false;
+    // Recheck the reachable range using the fresh internal limits, not just a browser preview.
+    for (unsigned i = 0; i < 5; i++) {
+        const auto* row = cJSON_GetArrayItem(mapping, i);
+        const double d = Item(row, "direction")->valuedouble;
+        const double zero = Item(row, "zero_ticks")->valuedouble;
+        const double a = (servos_[i].limit_min - zero) * .24 * std::numbers::pi / 180 / d;
+        const double b = (servos_[i].limit_max - zero) * .24 * std::numbers::pi / 180 / d;
+        if (std::max(lamp::pose::kJoints[i].lower, std::min(a, b)) >
+            std::min(lamp::pose::kJoints[i].upper, std::max(a, b)))
+            return false;
+    }
+    CJsonUniquePtr saved(cJSON_CreateObject());
+    cJSON_AddStringToObject(saved.get(), "format", "lamp-installation/1");
+    cJSON_AddStringToObject(saved.get(), "model_version", lamp::pose::kModel);
+    cJSON_AddStringToObject(saved.get(), "calibration_version", lamp::pose::kCalibration);
+    cJSON_AddItemToObject(saved.get(), "mapping", cJSON_Duplicate(mapping, true));
+    // All old target poses used the previous mapping; clear them in the same namespace.
+    auto* modes = const_cast<cJSON*>(Item(Item(next->source.get(), "profiles"), "modes"));
+    for (auto* m = modes->child; m; m = m->next)
+        cJSON_ReplaceItemInObjectCaseSensitive(m, "targets", cJSON_CreateObject());
+    auto cleared = lamp::pose::ParseConfiguration(lamp::Encode(next->source.get()));
+    if (!cleared)
+        return false;
+    const auto install = lamp::Encode(saved.get());
+    auto compact = TeachingPayload(cleared->source.get(), mode_);
+    if (lamp::Text(compact.get(), "binding").empty() || ReadCancelled())
+        return false;
+    const auto teaching = lamp::Encode(compact.get());
+    if (teaching.size() > 2048 || install.size() > 2048)
+        return false;
+    nvs_handle_t h;
+    if (nvs_open("lamp_native", NVS_READWRITE, &h) != ESP_OK)
+        return false;
+    auto err = nvs_set_blob(h, "install_v1", install.data(), install.size());
+    if (err == ESP_OK)
+        err = nvs_set_blob(h, "device_v1", teaching.data(), teaching.size());
+    if (err == ESP_OK)
+        err = nvs_commit(h);
+    nvs_close(h);
+    if (err != ESP_OK)
+        return false;
+    std::lock_guard lock(mutex_);
+    configuration_ = std::move(*cleared);
+    configuration_error_.clear();
+    last_target_.reset();
+    armed_ = false;
+    return true;
+}
+std::string LampHardwareExecutor::PanelConfig(const std::string& candidate) {
+    std::lock_guard lock(mutex_);
+    CJsonUniquePtr fallback(cJSON_Parse(lamp::pose::kDeviceConfiguration));
+    auto* base = configuration_ ? configuration_->source.get() : fallback.get();
+    CJsonUniquePtr requested(candidate.empty() ? nullptr : cJSON_Parse(candidate.c_str()));
+    auto cfg = candidate.empty() ? lamp::pose::ParseConfiguration(lamp::Encode(base))
+                                 : Installation(base, Item(requested.get(), "mapping"));
+    if (!cfg)
+        return Error("INVALID_MAPPING", cfg.error());
+    CJsonUniquePtr out(cJSON_CreateObject());
+    cJSON_AddBoolToObject(out.get(), "ok", true);
+    auto* rows = cJSON_AddArrayToObject(out.get(), "mapping");
+    auto* servos = Item(Item(cfg->source.get(), "hardware"), "servos");
+    const int convention[] = {1, -1, -1, 1, 1};
+    for (unsigned i = 0; i < 5; i++) {
+        const auto* s = cJSON_GetArrayItem(servos, i);
+        const auto zero = Item(s, "zero_ticks")->valuedouble;
+        const auto d = Item(s, "direction")->valuedouble;
+        auto lo = std::max(lamp::pose::kJoints[i].lower, -zero * .24 / 180 * std::numbers::pi / d);
+        auto hi = std::min(lamp::pose::kJoints[i].upper,
+                           (1000 - zero) * .24 / 180 * std::numbers::pi / d);
+        double a = (0 - zero) * .24 / 180 * std::numbers::pi / d;
+        double b = (1000 - zero) * .24 / 180 * std::numbers::pi / d;
+        lo = std::max(lamp::pose::kJoints[i].lower, std::min(a, b));
+        hi = std::min(lamp::pose::kJoints[i].upper, std::max(a, b));
+        if (servos_[i].limits_at) {
+            a = (servos_[i].limit_min - zero) * .24 / 180 * std::numbers::pi / d;
+            b = (servos_[i].limit_max - zero) * .24 / 180 * std::numbers::pi / d;
+            lo = std::max(lo, std::min(a, b));
+            hi = std::min(hi, std::max(a, b));
+        }
+        if (lo > hi)
+            return Error("INVALID_MAPPING", "No reachable joint range for this installation");
+        auto* row = cJSON_Duplicate(s, true);
+        cJSON_AddNumberToObject(row, "lower_rad", lo);
+        cJSON_AddNumberToObject(row, "upper_rad", hi);
+        cJSON_AddNumberToObject(row, "display_sign", convention[i]);
+        cJSON_AddItemToArray(rows, row);
+    }
+    cJSON_AddStringToObject(out.get(), "api_version", "lamp-twin/1");
+    cJSON_AddStringToObject(out.get(), "pose_space", "urdf_rad");
+    const double tool[] = {lamp::pose::kTool.x, lamp::pose::kTool.y, lamp::pose::kTool.z};
+    cJSON_AddItemToObject(out.get(), "tool_xyz", cJSON_CreateDoubleArray(tool, 3));
+    auto* geometry = cJSON_AddArrayToObject(out.get(), "urdf_joints");
+    for (unsigned i = 0; i < 5; i++) {
+        auto* row = cJSON_CreateObject();
+        cJSON_AddStringToObject(row, "joint", lamp::pose::kNames[i]);
+        const auto& j = lamp::pose::kJoints[i];
+        const std::pair<const char*, lamp::pose::Vec> vectors[] = {
+            {"xyz", j.xyz}, {"rpy", j.rpy}, {"axis", j.axis}};
+        for (const auto& [key, v] : vectors) {
+            double values[] = {v.x, v.y, v.z};
+            cJSON_AddItemToObject(row, key, cJSON_CreateDoubleArray(values, 3));
+        }
+        cJSON_AddNumberToObject(row, "lower_rad", j.lower);
+        cJSON_AddNumberToObject(row, "upper_rad", j.upper);
+        cJSON_AddItemToArray(geometry, row);
+    }
+    // External mesh clients resolve their own assets by this version, using the same raw poses.
+    cJSON_AddStringToObject(out.get(), "model_version", lamp::pose::kModel);
+    cJSON_AddBoolToObject(out.get(), "configuration_loaded", configuration_.has_value());
+    return lamp::Encode(out.get());
+}
+std::string LampHardwareExecutor::PanelSubmit(const std::string& body) {
+    if (body.empty() || body.size() > 2048)
+        return Error("INVALID_REQUEST", "Panel request too large");
+    CJsonUniquePtr root(cJSON_Parse(body.c_str()));
+    const auto op = lamp::Text(root.get(), "operation"), id = lamp::Text(root.get(), "request_id");
+    const auto* args = Item(root.get(), "args");
+    if (!cJSON_IsObject(root.get()) || cJSON_GetArraySize(root.get()) != 3 || id.empty() ||
+        id.size() > 87 || !cJSON_IsObject(args))
+        return Error("INVALID_REQUEST", "Expected operation, request_id and args");
+    if (op == "acquire" || op == "release") {
+        if (cJSON_GetArraySize(args))
+            return Error("INVALID_REQUEST", "Control ownership has no parameters");
+        std::lock_guard lock(mutex_);
+        if (!queued_.empty() || !active_.empty())
+            return Error("BUSY", "Wait for task completion or stop first");
+        manual_ = op == "acquire";
+        armed_ = false;
+        rest_at_ = 0;
+        return "{\"ok\":true,\"ownership_changed\":true}";
+    }
+    bool valid = false;
+    if (op == "cancel")
+        valid = cJSON_GetArraySize(args) == 0;
+    if (op == "set_torque")
+        valid = cJSON_GetArraySize(args) == 1 && cJSON_IsBool(Item(args, "enabled"));
+    if (op == "move") {
+        const auto* duration = Item(args, "duration_sec");
+        auto q = lamp::pose::ParsePose(Item(args, "pose_rad"));
+        valid = cJSON_GetArraySize(args) == 2 && q.has_value() && cJSON_IsNumber(duration) &&
+                std::isfinite(duration->valuedouble) && duration->valuedouble >= .2 &&
+                duration->valuedouble <= 10;
+    }
+    if (op == "install") {
+        valid = cJSON_GetArraySize(args) == 2 && cJSON_IsTrue(Item(args, "clear_targets"));
+        if (valid) {
+            const auto preview = PanelConfig(lamp::Encode(args));
+            CJsonUniquePtr checked(cJSON_Parse(preview.c_str()));
+            valid = cJSON_IsTrue(Item(checked.get(), "ok"));
+        }
+    }
+    if (!valid)
+        return Error("INVALID_REQUEST", "Unsupported panel operation or invalid parameters");
+    return SubmitChecked(body, true);
+}
 bool LampHardwareExecutor::Ready() {
     std::lock_guard lock(mutex_);
     return live_ && configuration_.has_value();
@@ -221,7 +451,10 @@ std::string LampHardwareExecutor::Submit(const std::string& body) {
     auto checked = lamp::Command(body);
     if (!checked)
         return Error("INVALID_REQUEST", checked.error());
-    CJsonUniquePtr o(cJSON_Parse(checked->c_str()));
+    return SubmitChecked(*checked, false);
+}
+std::string LampHardwareExecutor::SubmitChecked(const std::string& body, bool panel) {
+    CJsonUniquePtr o(cJSON_Parse(body.c_str()));
     const auto op = lamp::Text(o.get(), "operation"), id = lamp::Text(o.get(), "request_id");
     const auto* args = Item(o.get(), "args");
     if (id.size() > 87)
@@ -244,9 +477,13 @@ std::string LampHardwareExecutor::Submit(const std::string& body) {
                    : Error("REQUEST_ID_CONFLICT", "Request ID reused with different content");
     const bool emergency =
         op == "cancel" || (op == "set_torque" && cJSON_IsFalse(Item(args, "enabled")));
-    if (!live_ || (!configuration_ && !emergency))
+    if (!live_ || (!configuration_ && !emergency && !(panel && op == "install")))
         return Error("UNAVAILABLE",
                      configuration_error_.empty() ? setup_error_ : configuration_error_);
+    if (!panel && manual_ && !emergency)
+        return Error("MANUAL_CONTROL", "Web test panel owns motion; release manual control first");
+    if (panel && !manual_ && !emergency)
+        return Error("NO_MANUAL_CONTROL", "Acquire manual control first");
     const bool preempt = op == "cancel" || op == "rest" ||
                          (op == "set_torque" && cJSON_IsFalse(Item(args, "enabled")));
     if (preempt && op == "cancel") {
@@ -287,12 +524,20 @@ std::string LampHardwareExecutor::Submit(const std::string& body) {
     }
     records_[id] = {sig, op, "accepted", "Awaiting local worker"};
     order_.push_back(id);
-    queued_ = *checked;
+    queued_ = body;
     return Receipt(id, records_[id]);
 }
 std::string LampHardwareExecutor::State() {
     CJsonUniquePtr o(cJSON_Parse(LampLocalExecutor::State().c_str()));
     std::lock_guard lock(mutex_);
+    cJSON_AddStringToObject(o.get(), "api_version", "lamp-twin/1");
+    cJSON_AddStringToObject(o.get(), "pose_space", "urdf_rad");
+    cJSON_AddBoolToObject(o.get(), "manual_control", manual_);
+    if (last_target_) {
+        auto* pose = cJSON_AddObjectToObject(o.get(), "target_pose_rad");
+        for (unsigned i = 0; i < 5; i++)
+            cJSON_AddNumberToObject(pose, lamp::pose::kNames[i], (*last_target_)[i]);
+    }
     cJSON_ReplaceItemInObjectCaseSensitive(o.get(), "executor",
                                            cJSON_CreateString("local_uart_hardware"));
     cJSON_ReplaceItemInObjectCaseSensitive(o.get(), "software_stage",
@@ -314,7 +559,6 @@ std::string LampHardwareExecutor::State() {
     if (configuration_) {
         auto* pose = cJSON_AddObjectToObject(o.get(), "pose_rad");
         auto* mappings = Item(Item(configuration_->source.get(), "hardware"), "servos");
-        bool torque = true, unloaded = true;
         const auto now = esp_timer_get_time();
         for (int j = 0; j < 5; j++) {
             const auto* s = cJSON_GetArrayItem(mappings, j);
@@ -324,13 +568,17 @@ std::string LampHardwareExecutor::State() {
                                             Item(s, "direction")->valuedouble *
                                             Item(s, "degrees_per_tick")->valuedouble *
                                             std::numbers::pi / 180);
-            const bool fresh = servos_[j].torque_at && now - servos_[j].torque_at < 1500000;
-            torque &= fresh && servos_[j].torque == 1;
-            unloaded &= fresh && servos_[j].torque == 0;
         }
-        cJSON_AddBoolToObject(o.get(), "torque_enabled_confirmed", torque);
-        cJSON_AddBoolToObject(o.get(), "unloaded_confirmed", unloaded);
     }
+    bool torque = true, unloaded = true;
+    const auto now = esp_timer_get_time();
+    for (const auto& servo : servos_) {
+        const bool fresh = servo.torque_at && now - servo.torque_at < 1500000;
+        torque &= fresh && servo.torque == 1;
+        unloaded &= fresh && servo.torque == 0;
+    }
+    cJSON_AddBoolToObject(o.get(), "torque_enabled_confirmed", torque);
+    cJSON_AddBoolToObject(o.get(), "unloaded_confirmed", unloaded);
     auto* supported = cJSON_AddArrayToObject(o.get(), "unsupported_primitives");
     cJSON_AddItemToArray(supported, cJSON_CreateString("A10"));
     if (!active_.empty())
@@ -378,13 +626,22 @@ bool LampHardwareExecutor::Target(const lamp::pose::Pose& q, unsigned ms, uint32
     if (!ticks)
         return false;
     for (unsigned i = 0; i < 5; i++)
+        if (!servos_[i].limits_at || (*ticks)[i] < servos_[i].limit_min ||
+            (*ticks)[i] > servos_[i].limit_max)
+            return false;
+    for (unsigned i = 0; i < 5; i++)
         if (epoch_ != token || !Write(i + 1, 1, {Lo((*ticks)[i]), Hi((*ticks)[i]), Lo(ms), Hi(ms)}))
             return false;
+    std::lock_guard lock(mutex_);
+    last_target_ = q;
     return true;
 }
 bool LampHardwareExecutor::Torque(bool enabled, uint32_t token) {
     lamp::pose::Pose q;
     if (enabled) {
+        for (unsigned i = 0; i < 5; i++)
+            if (!Read(i, 21))
+                return false;
         if (!StopMotors())
             return false;
         if (!Positions(q) || epoch_ != token)
@@ -560,6 +817,16 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
         Finish(id, "completed", "Torque state confirmed on all five IDs");
         return;
     }
+    if (op == "install") {
+        if (!SaveInstallation(Item(args, "mapping"))) {
+            failure(
+                "Installation save requires fresh unloaded feedback, valid mapping and NVS commit");
+            return;
+        }
+        Finish(id, "completed",
+               "Installation mapping saved; previous target teaching invalidated; motion disarmed");
+        return;
+    }
     if (op == "record_calibration") {
         if (!RecordCalibration(lamp::Text(args, "target_id"), token)) {
             failure(
@@ -593,6 +860,45 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
             failure("Five servos must be in position mode with torque enabled");
             return;
         }
+    for (unsigned i = 0; i < 5; i++)
+        if (!Read(i, 21)) {
+            failure("Cannot read servo internal position limits");
+            return;
+        }
+    if (op == "move") {
+        auto target = lamp::pose::ParsePose(Item(args, "pose_rad"));
+        lamp::pose::Plan plan;
+        if (!target || !lamp::pose::ToTicks(*configuration_, *target)) {
+            failure("Invalid manual target or hardware range");
+            return;
+        }
+        for (unsigned n = 0; n <= 100; n++) {
+            auto q = lamp::pose::Blend(current, *target, double(n) / 100);
+            auto ticks = lamp::pose::ToTicks(*configuration_, q);
+            bool valid = ticks.has_value() && lamp::pose::Safe(q, configuration_->obstacles);
+            if (ticks)
+                for (unsigned i = 0; i < 5; i++)
+                    valid &=
+                        (*ticks)[i] >= servos_[i].limit_min && (*ticks)[i] <= servos_[i].limit_max;
+            if (!valid) {
+                failure("Manual path exceeds geometry or position limits");
+                return;
+            }
+        }
+        plan.ok = true;
+        plan.entry = current;
+        lamp::pose::Phase phase;
+        phase.from = current;
+        phase.to = *target;
+        phase.duration = Item(args, "duration_sec")->valuedouble;
+        plan.phases.push_back(phase);
+        if (!Play(plan, token)) {
+            failure("Manual movement interrupted or endpoint not confirmed");
+            return;
+        }
+        Finish(id, "completed", "Manual target confirmed from actual feedback");
+        return;
+    }
     CJsonUniquePtr steps(cJSON_CreateArray());
     if (op == "rest") {
         auto* s = cJSON_CreateObject();
@@ -624,6 +930,18 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
             failure(plan.requires_light ? "This preset requires a physical light driver"
                                         : plan.error);
             return;
+        }
+        for (unsigned n = 0; n <= 120; n++) {
+            auto ticks = lamp::pose::ToTicks(*configuration_, plan.At(plan.Duration() * n / 120));
+            bool reachable = ticks.has_value();
+            if (ticks)
+                for (unsigned j = 0; j < 5; j++)
+                    reachable &=
+                        (*ticks)[j] >= servos_[j].limit_min && (*ticks)[j] <= servos_[j].limit_max;
+            if (!reachable) {
+                failure("Group preflight exceeds installed servo or device limits");
+                return;
+            }
         }
         duration += plan.Duration();
         if (duration > 60) {
@@ -718,8 +1036,8 @@ void LampHardwareExecutor::HardwareLoop() {
             Read(i, 28);
             Read(i, 32);
         }
-        const uint8_t cmds[] = {26, 27, 30};
-        Read((telemetry / 3) % 5, cmds[telemetry % 3]);
+        const uint8_t cmds[] = {26, 27, 30, 21};
+        Read((telemetry / 4) % 5, cmds[telemetry % 4]);
         telemetry++;
         CloseRestChat();
         vTaskDelay(pdMS_TO_TICKS(80));

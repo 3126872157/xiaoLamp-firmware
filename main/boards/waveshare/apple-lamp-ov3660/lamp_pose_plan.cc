@@ -425,7 +425,7 @@ std::expected<Configuration, std::string> ParseConfiguration(const std::string& 
             const double d = Number(s, "direction"), zero = Number(s, "zero_ticks"),
                          scale = Number(s, "degrees_per_tick");
             if (Text(s, "joint") != kNames[i] || Number(s, "id") != i + 1 || (d != 1 && d != -1) ||
-                zero < 0 || zero > 1000 || std::floor(zero) != zero || !Close(scale, .24))
+                zero < -1000 || zero > 2000 || !Close(scale, .24))
                 throw std::runtime_error("Invalid servo mapping");
         }
         return c;
@@ -794,6 +794,10 @@ std::expected<std::array<int, 5>, std::string> ToTicks(const Configuration& conf
                   hi = std::min(1000, int(std::floor(std::max(a, b))));
         if (lo > hi)
             return std::unexpected("Mapping has no representable range");
+        const double ideal = zero + q[j] * factor;
+        if (ideal < -1e-8 || ideal > 1000 + 1e-8)
+            return std::unexpected(
+                "Target outside physical servo travel after installation offset");
         ticks[j] = std::clamp(int(std::round(zero + q[j] * factor)), lo, hi);
     }
     return ticks;

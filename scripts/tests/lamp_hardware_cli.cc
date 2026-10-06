@@ -21,7 +21,7 @@ int position[] = {500, 834, 130, 625, 500}, target[] = {500, 834, 130, 625, 500}
 unsigned writes[256] = {};
 int drop_id = 0;
 bool frozen = false, nvs_fail = false;
-std::string saved;
+std::string saved, installation;
 const auto boot = std::chrono::steady_clock::now();
 struct TaskExit {};
 void StopTasks() {
@@ -125,8 +125,8 @@ int uart_write_bytes(int, const void* raw, size_t count) {
         if (torque[i] && !frozen)
             position[i] = target[i];
     } else {
-        assert(p.command == 26 || p.command == 27 || p.command == 28 || p.command == 30 ||
-               p.command == 32);
+        assert(p.command == 21 || p.command == 26 || p.command == 27 || p.command == 28 ||
+               p.command == 30 || p.command == 32);
         if (drop_id == int(p.id))
             return count;
         unsigned value = p.command == 28   ? position[i]
@@ -140,6 +140,12 @@ int uart_write_bytes(int, const void* raw, size_t count) {
         frame.push_back(value & 255);
         if (lamp::bus::ReadLength(p.command) >= 2)
             frame.push_back((value >> 8) & 255);
+        if (p.command == 21) {
+            frame[5] = 0;
+            frame[6] = 0;
+            frame.push_back(232);
+            frame.push_back(3);
+        }
         if (p.command == 30) {
             frame.push_back(0);
             frame.push_back(0);
@@ -167,26 +173,30 @@ int uart_read_bytes(int, void* out, size_t count, unsigned) {
     return n;
 }
 int nvs_open(const char*, int rw, nvs_handle_t* h) {
-    if (!rw && saved.empty())
+    if (!rw && saved.empty() && installation.empty())
         return ESP_ERR_NVS_NOT_FOUND;
     *h = 1;
     return 0;
 }
 void nvs_close(nvs_handle_t) {}
-int nvs_get_blob(nvs_handle_t, const char*, void* out, size_t* n) {
+int nvs_get_blob(nvs_handle_t, const char* key, void* out, size_t* n) {
+    const auto& blob = std::string(key) == "install_v1" ? installation : saved;
+    if (blob.empty())
+        return ESP_ERR_NVS_NOT_FOUND;
     if (!out) {
-        *n = saved.size();
+        *n = blob.size();
         return 0;
     }
-    assert(*n >= saved.size());
-    std::memcpy(out, saved.data(), saved.size());
-    *n = saved.size();
+    assert(*n >= blob.size());
+    std::memcpy(out, blob.data(), blob.size());
+    *n = blob.size();
     return 0;
 }
-int nvs_set_blob(nvs_handle_t, const char*, const void* data, size_t n) {
+int nvs_set_blob(nvs_handle_t, const char* key, const void* data, size_t n) {
     if (nvs_fail)
         return ESP_FAIL;
-    saved.assign(static_cast<const char*>(data), n);
+    (std::string(key) == "install_v1" ? installation : saved)
+        .assign(static_cast<const char*>(data), n);
     return 0;
 }
 int nvs_commit(nvs_handle_t) { return 0; }
@@ -334,6 +344,65 @@ int main() {
     auto migrated_state = Json(migrated->State());
     assert(cJSON_GetArraySize(Item(Item(migrated_state.get(), "calibrated_targets"), "sit")) == 1);
     assert(cJSON_IsFalse(Item(migrated_state.get(), "motion_enabled")));
+    StopTasks();
+    saved = old;
+    auto* panel = new LampHardwareExecutor();
+    auto call = [&](const char* id, const char* op, const std::string& args = "{}") {
+        auto result =
+            Json(panel->PanelSubmit(std::string("{\"request_id\":\"") + id + "\",\"operation\":\"" +
+                                    op + "\",\"args\":" + args + "}"));
+        assert(cJSON_IsTrue(Item(result.get(), "ok")));
+    };
+    call("own", "acquire");
+    auto denied = Json(panel->Submit(
+        Command("denied", "execute", R"({"action_id":"execute_primitive","skill_id":"A01"})")));
+    assert(lamp::Text(Item(denied.get(), "error"), "code") == "MANUAL_CONTROL");
+    call("off-web", "set_torque", R"({"enabled":false})");
+    assert(Wait(*panel, "off-web") == "completed");
+    const std::string mapping =
+        R"([{"direction":1,"zero_ticks":501.5},{"direction":1,"zero_ticks":500},{"direction":1,"zero_ticks":500},{"direction":1,"zero_ticks":500},{"direction":1,"zero_ticks":510}])";
+    auto preview = Json(panel->PanelConfig("{\"mapping\":" + mapping + "}"));
+    assert(cJSON_IsTrue(Item(preview.get(), "ok")));
+    assert(cJSON_GetArraySize(Item(preview.get(), "urdf_joints")) == 5);
+    auto invalid = Json(panel->PanelConfig(R"({"mapping":[{"direction":0,"zero_ticks":500}]})"));
+    assert(cJSON_IsFalse(Item(invalid.get(), "ok")));
+    call("install-web", "install", "{\"mapping\":" + mapping + ",\"clear_targets\":true}");
+    assert(Wait(*panel, "install-web") == "completed");
+    auto installed = Json(panel->State());
+    assert(cJSON_GetArraySize(Item(Item(installed.get(), "calibrated_targets"), "sit")) == 0);
+    assert(cJSON_IsFalse(Item(installed.get(), "motion_enabled")));
+    call("enable-web", "set_torque", R"({"enabled":true})");
+    assert(Wait(*panel, "enable-web") == "completed");
+    auto current = Json(panel->State());
+    auto* rawq = Item(current.get(), "pose_rad");
+    CJsonUniquePtr q(cJSON_CreateObject());
+    for (unsigned i = 0; i < 5; i++)
+        cJSON_AddNumberToObject(q.get(), lamp::pose::kNames[i],
+                                cJSON_GetArrayItem(rawq, i)->valuedouble + (i == 3 ? .02 : 0));
+    call("move-web", "move", "{\"pose_rad\":" + lamp::Encode(q.get()) + ",\"duration_sec\":0.3}");
+    assert(Wait(*panel, "move-web") == "completed");
+    call("install-energized", "install", "{\"mapping\":" + mapping + ",\"clear_targets\":true}");
+    assert(Wait(*panel, "install-energized") == "failed");
+    call("off-last", "set_torque", R"({"enabled":false})");
+    assert(Wait(*panel, "off-last") == "completed");
+    nvs_fail = true;
+    const auto install_before = installation;
+    call("install-save-fail", "install", "{\"mapping\":" + mapping + ",\"clear_targets\":true}");
+    assert(Wait(*panel, "install-save-fail") == "failed");
+    assert(installation == install_before);
+    nvs_fail = false;
+    StopTasks();
+    auto* install_reboot = new LampHardwareExecutor();
+    assert(install_reboot->Ready());
+    auto reboot_config = Json(install_reboot->PanelConfig());
+    assert(Item(cJSON_GetArrayItem(Item(reboot_config.get(), "mapping"), 0), "zero_ticks")
+               ->valuedouble == 501.5);
+    assert(
+        Item(cJSON_GetArrayItem(Item(reboot_config.get(), "mapping"), 4), "direction")->valueint ==
+        1);
+    auto reboot_state = Json(install_reboot->State());
+    assert(cJSON_IsFalse(Item(reboot_state.get(), "motion_enabled")));
+    assert(cJSON_IsFalse(Item(reboot_state.get(), "manual_control")));
     StopTasks();
     saved = "{}";
     auto* bad = new LampHardwareExecutor();

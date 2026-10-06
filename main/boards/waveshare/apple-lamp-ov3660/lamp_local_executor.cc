@@ -120,6 +120,10 @@ std::string LampLocalExecutor::State() {
                 cJSON_AddNumberToObject(entry, age.c_str(), (now - value.second) / 1000);
             }
         cJSON_AddNumberToObject(entry, "read_failures", s.failures);
+        if (s.limits_at) {
+            cJSON_AddNumberToObject(entry, "limit_min", s.limit_min);
+            cJSON_AddNumberToObject(entry, "limit_max", s.limit_max);
+        }
         if (!s.last_error.empty())
             cJSON_AddStringToObject(entry, "last_error", s.last_error.c_str());
         cJSON_AddItemToArray(feedback, entry);
@@ -153,6 +157,17 @@ bool LampLocalExecutor::Read(unsigned index, uint8_t command) {
             auto& s = servos_[index];
             const auto now = esp_timer_get_time();
             switch (command) {
+                case 21:
+                    if (lamp::bus::Word(packet.parameters) >
+                            lamp::bus::Word(std::span(packet.parameters).subspan(2)) ||
+                        lamp::bus::Word(std::span(packet.parameters).subspan(2)) > 1000) {
+                        s.last_error = "Invalid device position limits";
+                        return false;
+                    }
+                    s.limit_min = lamp::bus::Word(packet.parameters);
+                    s.limit_max = lamp::bus::Word(std::span(packet.parameters).subspan(2));
+                    s.limits_at = now;
+                    break;
                 case 28:
                     s.position = lamp::bus::SignedWord(packet.parameters);
                     s.position_at = now;

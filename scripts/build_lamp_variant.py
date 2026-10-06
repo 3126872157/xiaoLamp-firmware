@@ -13,6 +13,7 @@ ROLES = {
     "simulator": ("apple-lamp-ov3660", b"Firmware role: SIMULATOR-BRIDGE"),
     "local-readonly": ("apple-lamp-ov3660-local-readonly", b"Firmware role: LOCAL-READONLY"),
     "local-hardware": ("apple-lamp-ov3660-local-hardware", b"Firmware role: LOCAL-HARDWARE"),
+    "local-twin": ("apple-lamp-ov3660-local-twin", b"Firmware role: LOCAL-TWIN"),
 }
 
 
@@ -27,8 +28,11 @@ def validate_role(image: bytes, role: str, sdk: str):
     for symbol in ("APPLE_LAMP_LOCAL_EXECUTOR", "APPLE_LAMP_UART_PROBE", "COMPILER_CXX_EXCEPTIONS"):
         if (f"CONFIG_{symbol}=y" in sdk.splitlines()) != expected_local:
             raise ValueError(f"Active configuration does not match role: {symbol}")
-    if ("CONFIG_APPLE_LAMP_HARDWARE_MOTION=y" in sdk.splitlines()) != (role == "local-hardware"):
+    if ("CONFIG_APPLE_LAMP_HARDWARE_MOTION=y" in sdk.splitlines()) != (role in ("local-hardware", "local-twin")):
         raise ValueError("Hardware motion configuration does not match role")
+    if ("CONFIG_APPLE_LAMP_TWIN_WEB=y" in sdk.splitlines()) != (role == "local-twin"):
+        raise ValueError("Web test panel configuration does not match role")
+
 
 
 def archive(role: str):
@@ -52,7 +56,7 @@ def archive(role: str):
         files.append({"address": address, "file": relative, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()})
     manifest = {"role": role, "board_name": ROLES[role][0], "git_commit": commit,
                 "worktree_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
-                "app_sha256": digest, "motion_enabled": role == "local-hardware",
+                "app_sha256": digest, "motion_enabled": role in ("local-hardware", "local-twin"),
                 "startup_armed": False,
                 "uart_probe_enabled": role != "simulator", "flash_files": files,
                 "write_flash_args": args["write_flash_args"], "contains_local_configuration": True}
@@ -104,7 +108,7 @@ def main():
         subprocess.run([sys.executable, "scripts/build.py", "waveshare/apple-lamp-ov3660", "--name",
                         ROLES[args.role][0], "--language", "zh-CN"], cwd=ROOT, env=env, check=True)
     manifest = archive(args.role)
-    print(f"ROLE={args.role}; manifest={manifest}; hardware motion capability={args.role == 'local-hardware'}; startup disarmed", flush=True)
+    print(f"ROLE={args.role}; manifest={manifest}; hardware motion capability={args.role in ('local-hardware', 'local-twin')}; startup disarmed", flush=True)
     if args.flash:
         flash(manifest, args.role, args.port)
 

@@ -9,6 +9,8 @@ public:
     std::string Inspect(const std::string& request_id) override;
     std::string State() override;
     bool Ready() override;
+    std::string PanelSubmit(const std::string& body);
+    std::string PanelConfig(const std::string& candidate = "");
 
 private:
     struct Record {
@@ -20,6 +22,11 @@ private:
     std::string queued_, active_;
     std::atomic<uint32_t> epoch_{0};
     bool armed_ = false;
+    bool manual_ = false;
+    std::optional<lamp::pose::Pose> last_target_;
+    std::string SubmitChecked(const std::string& body, bool panel);
+    bool SaveInstallation(const cJSON* mapping);
+    void LoadInstallation();
     int mode_ = 0;
     std::set<std::string> turns_;
     int64_t dialogue_at_ = 0;

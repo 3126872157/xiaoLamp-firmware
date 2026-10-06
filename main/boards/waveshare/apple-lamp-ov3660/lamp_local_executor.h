@@ -15,6 +15,8 @@ public:
 protected:
     struct Servo {
         int position = 0, temperature = -1, voltage_mv = -1, mode = -1, torque = -1;
+        int limit_min = -1, limit_max = -1;
+        int64_t limits_at = 0;
         int64_t position_at = 0, temperature_at = 0, voltage_at = 0, mode_at = 0, torque_at = 0;
         unsigned failures = 0;
         std::string last_error;

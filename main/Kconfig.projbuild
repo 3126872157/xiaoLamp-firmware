@@ -1176,6 +1176,13 @@ menu "Apple Lamp execution backend"
         help
             Real CMD1/12/29/31 output, explicit operator enable, local plans and NVS calibration.
             Distinct hardware firmware identity; no automatic movement at boot.
+    config APPLE_LAMP_TWIN_WEB
+        bool "Embedded LAN twin test and installation calibration page"
+        depends on APPLE_LAMP_HARDWARE_MOTION
+        default n
+        help
+            Dedicated local-twin identity; HTTP on port 8080 after Wi-Fi connects.
+            Browser-rendered 2D preview, operator control, installation direction and zero.
 endmenu
 
 endmenu

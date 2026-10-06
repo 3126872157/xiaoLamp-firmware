@@ -7,6 +7,7 @@
 #include "lamp_bridge.h"
 #include "lamp_hardware_executor.h"
 #include "lamp_local_executor.h"
+#include "lamp_twin_web.h"
 #include "wifi_board.h"
 
 #include <driver/i2c_master.h>
@@ -118,7 +119,11 @@ public:
         InitializeCamera();
 #if CONFIG_APPLE_LAMP_HARDWARE_MOTION
         lamp_executor_ = new LampHardwareExecutor();
+#if CONFIG_APPLE_LAMP_TWIN_WEB
+        ESP_LOGI(TAG, "Firmware role: LOCAL-TWIN; local web test panel, no startup motion");
+#else
         ESP_LOGI(TAG, "Firmware role: LOCAL-HARDWARE; operator enable required, no startup motion");
+#endif
 #elif CONFIG_APPLE_LAMP_LOCAL_EXECUTOR
         lamp_executor_ = new LampLocalExecutor();
         ESP_LOGI(TAG, "Firmware role: LOCAL-READONLY; no browser bridge, no movement writes");
@@ -134,6 +139,18 @@ public:
             TAG,
             "No-display board ready; USB console, AEC off; executor role selected at build time");
     }
+
+#if CONFIG_APPLE_LAMP_TWIN_WEB
+    void SetNetworkEventCallback(NetworkEventCallback callback) override {
+        WifiBoard::SetNetworkEventCallback(
+            [this, callback = std::move(callback)](NetworkEvent event, const std::string& data) {
+                if (event == NetworkEvent::Connected)
+                    StartLampTwinWeb(*static_cast<LampHardwareExecutor*>(lamp_executor_));
+                if (callback)
+                    callback(event, data);
+            });
+    }
+#endif
 
     AudioCodec* GetAudioCodec() override {
         static BoxAudioCodec audio_codec(
