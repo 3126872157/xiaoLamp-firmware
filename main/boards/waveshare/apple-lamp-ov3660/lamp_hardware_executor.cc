@@ -607,9 +607,24 @@ bool LampHardwareExecutor::StopMotors() {
         }
     return ok;
 }
+bool LampHardwareExecutor::ConfirmedRead(unsigned index, uint8_t command) {
+    for (unsigned attempt = 0; attempt < 2; attempt++) {
+        if (ReadCancelled()) {
+            io_error_ = "操作已被抢占";
+            return false;
+        }
+        if (Read(index, command))
+            return true;
+        if (!attempt)
+            vTaskDelay(pdMS_TO_TICKS(40));
+    }
+    io_error_ = "ID " + std::to_string(index + 1) + " CMD " + std::to_string(command) +
+                " 读取失败（已重试）";
+    return false;
+}
 bool LampHardwareExecutor::Positions(lamp::pose::Pose& q) {
     for (unsigned i = 0; i < 5; i++)
-        if (!Read(i, 28))
+        if (!ConfirmedRead(i, 28))
             return false;
     std::lock_guard lock(mutex_);
     auto* mappings = Item(Item(configuration_->source.get(), "hardware"), "servos");
@@ -619,7 +634,16 @@ bool LampHardwareExecutor::Positions(lamp::pose::Pose& q) {
                Item(s, "degrees_per_tick")->valuedouble * Item(s, "direction")->valuedouble *
                std::numbers::pi / 180;
     }
-    return lamp::pose::InUrdf(q);
+    const double tolerance = 3 * .24 * std::numbers::pi / 180;
+    for (unsigned i = 0; i < 5; i++) {
+        const auto& joint = lamp::pose::kJoints[i];
+        if (q[i] < joint.lower - tolerance || q[i] > joint.upper + tolerance) {
+            io_error_ = "ID " + std::to_string(i + 1) + " 当前角度超出 URDF 限位，请校准安装偏置";
+            return false;
+        }
+        q[i] = std::clamp(q[i], joint.lower, joint.upper);
+    }
+    return true;
 }
 bool LampHardwareExecutor::Target(const lamp::pose::Pose& q, unsigned ms, uint32_t token) {
     auto ticks = lamp::pose::ToTicks(*configuration_, q);
@@ -640,7 +664,7 @@ bool LampHardwareExecutor::Torque(bool enabled, uint32_t token) {
     lamp::pose::Pose q;
     if (enabled) {
         for (unsigned i = 0; i < 5; i++)
-            if (!Read(i, 21))
+            if (!ConfirmedRead(i, 21))
                 return false;
         if (!StopMotors())
             return false;
@@ -649,47 +673,87 @@ bool LampHardwareExecutor::Torque(bool enabled, uint32_t token) {
         for (unsigned i = 0; i < 5; i++) {
             if (epoch_ != token)
                 return false;
-            if (!Read(i, 30))
+            if (!ConfirmedRead(i, 30))
                 return false;
             if (servos_[i].mode != 0 &&
-                (!Write(i + 1, 29, {0, 0, 0, 0}) || !Read(i, 30) || servos_[i].mode != 0))
+                (!Write(i + 1, 29, {0, 0, 0, 0}) || !ConfirmedRead(i, 30) || servos_[i].mode != 0))
                 return false;
         }
-        if (!Positions(q) || epoch_ != token || !Target(q, 500, token))
+        if (!Positions(q) || epoch_ != token)
             return false;
+        for (unsigned i = 0; i < 5; i++) {
+            const int tick = servos_[i].position;
+            if (tick < 0 || tick > 1000 || tick < servos_[i].limit_min ||
+                tick > servos_[i].limit_max) {
+                io_error_ = "ID " + std::to_string(i + 1) + " 当前 tick 超出设备限位";
+                return false;
+            }
+        }
+        // Align the exact raw position, never a clamped planning angle, before enabling.
+        for (unsigned i = 0; i < 5; i++)
+            if (epoch_ != token ||
+                !Write(i + 1, 1,
+                       {Lo(servos_[i].position), Hi(servos_[i].position), Lo(500), Hi(500)})) {
+                io_error_ = "ID " + std::to_string(i + 1) + " 保持当前位置发送失败";
+                return false;
+            }
+        {
+            std::lock_guard lock(mutex_);
+            last_target_ = q;
+        }
     }
     bool ok = true;
+    std::string first_error;
     for (unsigned i = 0; i < 5; i++) {
         if (epoch_ != token)
             return false;
         const bool wrote = Write(i + 1, 31, {static_cast<uint8_t>(enabled)});
-        const bool read = Read(i, 32);
+        const bool read = ConfirmedRead(i, 32);
         if (!wrote || !read || servos_[i].torque != int(enabled)) {
             ESP_LOGE("LampHW", "Torque confirmation failed ID%u", i + 1);
+            if (first_error.empty())
+                first_error = io_error_.empty()
+                                  ? "ID " + std::to_string(i + 1) +
+                                        " 扭矩确认失败，实际=" + std::to_string(servos_[i].torque)
+                                  : io_error_;
             ok = false;
         }
     }
     std::lock_guard lock(mutex_);
     armed_ = enabled && ok;
+    if (!ok)
+        io_error_ = first_error;
     return ok;
 }
 bool LampHardwareExecutor::Play(const lamp::pose::Plan& plan, uint32_t token) {
     const auto start = esp_timer_get_time();
     int64_t last_feedback = start;
     lamp::pose::Pose actual;
+    unsigned telemetry = 0;
+    std::array<unsigned, 10> missed{};
     while (true) {
         if (epoch_ != token)
             return false;
         const double elapsed = (esp_timer_get_time() - start) / 1e6;
-        const auto target = plan.At(std::min(elapsed, plan.Duration()));
-        if (!Target(target, 80, token))
+        const auto target = plan.At(std::min(elapsed + .04, plan.Duration()));
+        if (!Target(target, 120, token))
             return false;
-        if (esp_timer_get_time() - last_feedback >= 200000) {
-            if (!Positions(actual))
-                return false;
-            for (unsigned i = 0; i < 5; i++)
-                if (!Read(i, 32) || servos_[i].torque != 1)
+        if (esp_timer_get_time() - last_feedback >= 120000) {
+            // One bounded read between target frames, instead of ten blocking round trips.
+            const unsigned slot = telemetry++ % 10, i = slot / 2;
+            const uint8_t command = slot % 2 ? 32 : 28;
+            if (!Read(i, command, 40)) {
+                if (++missed[slot] >= 2) {
+                    io_error_ = "ID " + std::to_string(i + 1) + " 运动反馈持续读取失败";
                     return false;
+                }
+            } else {
+                missed[slot] = 0;
+                if (command == 32 && servos_[i].torque != 1) {
+                    io_error_ = "ID " + std::to_string(i + 1) + " 运动时扭矩已关闭";
+                    return false;
+                }
+            }
             last_feedback = esp_timer_get_time();
         }
         if (elapsed >= plan.Duration())
@@ -782,6 +846,7 @@ bool LampHardwareExecutor::RecordCalibration(const std::string& target, uint32_t
     return true;
 }
 void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
+    io_error_.clear();
     CJsonUniquePtr root(cJSON_Parse(body.c_str()));
     const auto id = lamp::Text(root.get(), "request_id"), op = lamp::Text(root.get(), "operation");
     const auto* args = Item(root.get(), "args");
@@ -798,6 +863,7 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
         }
         Finish(id, epoch_ == token ? "failed" : "cancelled", why);
     };
+    auto reject = [&](const std::string& why) { Finish(id, "failed", why); };
     if (op == "cancel") {
         const bool stopped = StopMotors();
         if (!stopped) {
@@ -811,7 +877,7 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
     }
     if (op == "set_torque") {
         if (!Torque(cJSON_IsTrue(Item(args, "enabled")), token)) {
-            failure("Torque/mode confirmation failed; inspect per-ID feedback");
+            failure(io_error_.empty() ? "扭矩/模式确认失败" : io_error_);
             return;
         }
         Finish(id, "completed", "Torque state confirmed on all five IDs");
@@ -845,14 +911,16 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
         std::lock_guard lock(mutex_);
         if (!armed_) {
             records_.at(id).status = "failed";
-            records_.at(id).reason = "Operator must explicitly enable torque after boot";
+            records_.at(id).reason =
+                "运动未授权：使能未完成，或故障/卸力/保存映射/"
+                "退出手动控制已关闭授权；请检查后重新使能";
             active_.clear();
             return;
         }
     }
     lamp::pose::Pose current;
     if (!Positions(current)) {
-        failure("Fresh five-axis position unavailable or outside URDF range");
+        failure(io_error_.empty() ? "当前位置读取失败" : io_error_);
         return;
     }
     for (unsigned i = 0; i < 5; i++)
@@ -869,7 +937,7 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
         auto target = lamp::pose::ParsePose(Item(args, "pose_rad"));
         lamp::pose::Plan plan;
         if (!target || !lamp::pose::ToTicks(*configuration_, *target)) {
-            failure("Invalid manual target or hardware range");
+            reject("Invalid manual target or hardware range");
             return;
         }
         for (unsigned n = 0; n <= 100; n++) {
@@ -881,7 +949,7 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
                     valid &=
                         (*ticks)[i] >= servos_[i].limit_min && (*ticks)[i] <= servos_[i].limit_max;
             if (!valid) {
-                failure("Manual path exceeds geometry or position limits");
+                reject("Manual path exceeds geometry or position limits");
                 return;
             }
         }
@@ -927,8 +995,8 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
             plan.limited = true;
         }
         if (!plan.ok || !std::isfinite(plan.Duration()) || plan.requires_light) {
-            failure(plan.requires_light ? "This preset requires a physical light driver"
-                                        : plan.error);
+            reject(plan.requires_light ? "This preset requires a physical light driver"
+                                       : plan.error);
             return;
         }
         for (unsigned n = 0; n <= 120; n++) {
@@ -939,13 +1007,13 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
                     reachable &=
                         (*ticks)[j] >= servos_[j].limit_min && (*ticks)[j] <= servos_[j].limit_max;
             if (!reachable) {
-                failure("Group preflight exceeds installed servo or device limits");
+                reject("Group preflight exceeds installed servo or device limits");
                 return;
             }
         }
         duration += plan.Duration();
         if (duration > 60) {
-            failure("Group exceeds 60 seconds");
+            reject("Group exceeds 60 seconds");
             return;
         }
         current = plan.At(plan.Duration());

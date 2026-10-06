@@ -253,6 +253,14 @@ int main() {
         *e, "preflight", "execute_group",
         R"({"steps":[{"action_id":"execute_primitive","skill_id":"A01"},{"action_id":"gaze_calibrated","target_id":"book"}]})");
     assert(Wait(*e, "preflight") == "failed");
+    assert(cJSON_IsTrue(Item(Json(e->State()).get(), "motion_enabled")));
+    Submit(*e, "nod-again", "execute", R"({"action_id":"execute_primitive","skill_id":"A01"})");
+    assert(Wait(*e, "nod-again") == "completed");
+    {
+        std::lock_guard l(bus_mutex);
+        before = writes[1];
+    }
+
     {
         std::lock_guard l(bus_mutex);
         assert(writes[1] == before);
@@ -353,7 +361,24 @@ int main() {
                                     op + "\",\"args\":" + args + "}"));
         assert(cJSON_IsTrue(Item(result.get(), "ok")));
     };
+    {
+        std::lock_guard l(bus_mutex);
+        position[4] = 1000;
+    }
     call("own", "acquire");
+    call("edge-enable", "set_torque", R"({"enabled":true})");
+    assert(Wait(*panel, "edge-enable") == "completed");
+    {
+        std::lock_guard l(bus_mutex);
+        assert(position[4] == 1000 && target[4] == 1000);
+    }
+    call("edge-off", "set_torque", R"({"enabled":false})");
+    assert(Wait(*panel, "edge-off") == "completed");
+    {
+        std::lock_guard l(bus_mutex);
+        position[4] = 500;
+    }
+
     auto denied = Json(panel->Submit(
         Command("denied", "execute", R"({"action_id":"execute_primitive","skill_id":"A01"})")));
     assert(lamp::Text(Item(denied.get(), "error"), "code") == "MANUAL_CONTROL");

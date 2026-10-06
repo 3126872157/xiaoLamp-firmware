@@ -603,7 +603,9 @@ void RegisterLampTools(LampActionExecutor& executor) {
         "'Nod once' and 'nod twice' each mean ONE A01 invocation with local default two nods; "
         "never submit two A01 steps for 'nod twice'. Explicit 3-5 nods use options.repetitions. "
         "After torque release, enable_torque only on wake or explicit finish-adjusting, before "
-        "motion. "
+        "motion. Wait for enable_torque task status completed; accepted is NOT enabled. "
+        "Do not re-enable after each successful action. Unknown A12 is disabled; standing is "
+        "set_mode stand. "
         "Returns bridge_request_id; queued/answered is NOT motion completion. Poll get_state.",
         PropertyList(
             {Property("sequence_json", kPropertyTypeString).SetMaxLength(lamp::kMaxCommandBytes)}),
@@ -689,7 +691,9 @@ void RegisterLampTools(LampActionExecutor& executor) {
         "self.lamp.enable_torque",
         "On a new wake after rest or user's explicit finish-adjusting, enable support at "
         "CURRENT measured pose, never restore an old target. Does not move or stand up. "
-        "Do not automatically enable during teaching. Then use run_sequence for stand/actions.",
+        "Do not automatically enable during teaching. accepted is NOT enabled: poll get_state "
+        "with its task_id and wait for completed before run_sequence. Enable once, not before "
+        "every successful action; if failed, inspect the reason instead of blindly retrying.",
         PropertyList(), [&executor](const PropertyList&) -> ReturnValue {
             return executor.Submit(TorqueCommand(executor.NewRequestId(), true));
         });

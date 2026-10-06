@@ -8,7 +8,7 @@ inline constexpr const char* kLampTwinPage = R"lamppage(<!doctype html>
 </style>
 <header><h1>台灯 · ESP32 测试面板</h1><small>五轴直连 · ESP32 串口驱动 · 安装偏置与方向校准</small></header>
 <main><div><section class="preview"><div class="row"><b>2D 侧视图</b><span class="tag">J2 / J3 / J4</span></div>
-<p class="muted">蓝色：目标预览　绿色：实际反馈<br>省略底座 Yaw 与末端旋转，不表示碰撞检测结果。</p>
+<p class="muted">蓝色：目标预览　绿色：实际反馈<br>关节中心连线含安装偏移；J3＝0 不代表两段连线垂直。省略 Yaw 与末端旋转，不表示碰撞检测结果。</p>
 <svg id="view" viewBox="0 0 620 430" preserveAspectRatio="xMidYMid meet" aria-label="台灯侧视连杆示意图"><path d="M20 398H600" stroke="#465974"/><rect x="260" y="386" width="100" height="12" rx="5" fill="#6a7c93"/><g id="target"/><g id="actual"/></svg>
 <div class="buttons"><span id="yaw" class="tag">Yaw —</span><span id="roll" class="tag">末端旋转 —</span></div></section>
 <details><summary>五轴反馈与诊断</summary><div id="feedback">等待反馈…</div><button id="export">导出本页日志</button><pre id="raw"></pre></details></div>

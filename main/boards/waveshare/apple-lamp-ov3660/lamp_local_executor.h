@@ -30,6 +30,6 @@ protected:
     std::string setup_error_;
     static void Run(void* self);
     void Loop();
-    bool Read(unsigned index, uint8_t command);
+    bool Read(unsigned index, uint8_t command, unsigned timeout_ms = 400);
     virtual bool ReadCancelled() const { return false; }
 };

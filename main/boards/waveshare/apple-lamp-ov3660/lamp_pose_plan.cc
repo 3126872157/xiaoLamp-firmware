@@ -224,7 +224,8 @@ bool InMode(const Pose& q, const Profile& p) {
     if (!InUrdf(q))
         return false;
     for (int j = 0; j < 5; j++)
-        if (q[j] - p.home[j] < p.ranges[j].min - 1e-8 || q[j] - p.home[j] > p.ranges[j].max + 1e-8)
+        if (j != 4 && (q[j] - p.home[j] < p.ranges[j].min - 1e-8 ||
+                       q[j] - p.home[j] > p.ranges[j].max + 1e-8))
             return false;
     return true;
 }

@@ -36,6 +36,8 @@ private:
     void HardwareLoop();
     void Execute(const std::string& body, uint32_t token);
     bool Positions(lamp::pose::Pose& q);
+    bool ConfirmedRead(unsigned index, uint8_t command);
+    std::string io_error_;
     bool Write(unsigned id, uint8_t cmd, std::initializer_list<uint8_t> params = {});
     bool Target(const lamp::pose::Pose& q, unsigned milliseconds, uint32_t token);
     bool Torque(bool enabled, uint32_t token);

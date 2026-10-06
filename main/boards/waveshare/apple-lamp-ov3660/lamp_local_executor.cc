@@ -134,7 +134,7 @@ std::string LampLocalExecutor::State() {
     return lamp::Encode(root.get());
 }
 void LampLocalExecutor::Run(void* self) { static_cast<LampLocalExecutor*>(self)->Loop(); }
-bool LampLocalExecutor::Read(unsigned index, uint8_t command) {
+bool LampLocalExecutor::Read(unsigned index, uint8_t command, unsigned timeout_ms) {
 #if CONFIG_APPLE_LAMP_LOCAL_EXECUTOR && CONFIG_APPLE_LAMP_UART_PROBE
     const auto request = lamp::bus::ReadRequest(index + 1, command);
     if (!request || ReadCancelled())
@@ -143,10 +143,11 @@ bool LampLocalExecutor::Read(unsigned index, uint8_t command) {
     bool ok = uart_write_bytes(UART_NUM_0, request->data(), request->size()) ==
               static_cast<int>(request->size());
     lamp::bus::Parser parser;
-    const auto deadline = esp_timer_get_time() + 400000;
+    const auto deadline = esp_timer_get_time() + timeout_ms * 1000;
     while (ok && !ReadCancelled() && esp_timer_get_time() < deadline) {
         uint8_t bytes[128];
-        const int count = uart_read_bytes(UART_NUM_0, bytes, sizeof(bytes), pdMS_TO_TICKS(20));
+        const int count = uart_read_bytes(UART_NUM_0, bytes, lamp::bus::ReadLength(command) + 6,
+                                          pdMS_TO_TICKS(20));
         if (count < 0)
             break;
         for (const auto& packet : parser.Push(std::span(bytes, count))) {
