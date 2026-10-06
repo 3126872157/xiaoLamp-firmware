@@ -1155,4 +1155,20 @@ menu "TAIJIPAI_S3_CONFIG"
         启动双声道
 endmenu
 
+menu "Apple Lamp execution backend"
+    depends on BOARD_TYPE_APPLE_LAMP_OV3660
+    config APPLE_LAMP_LOCAL_EXECUTOR
+        bool "Local hardware executor (read-only bringup)"
+        default n
+        help
+            Separate from the browser-bridge firmware; no physical movement is implemented yet.
+    config APPLE_LAMP_UART_PROBE
+        bool "Enable UART0 read-only probe on GPIO43/44 at 115200"
+        depends on APPLE_LAMP_LOCAL_EXECUTOR && ESP_CONSOLE_USB_SERIAL_JTAG && ESP_CONSOLE_SECONDARY_NONE
+        default n
+        help
+            Only for a verified 3.3V TTL BusLinker external port with common ground.
+            Sends read requests only; never enables torque or moves a servo.
+endmenu
+
 endmenu

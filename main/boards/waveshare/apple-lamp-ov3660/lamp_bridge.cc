@@ -536,7 +536,8 @@ void RegisterLampTools(LampActionExecutor& executor) {
         "self.lamp.list_primitives",
         "Discover lamp-action/2 semantic actions. Query cursor pages or skill_id for options. "
         "Use local presets, never angles/params/XYZ. sit:user; work:book; stand:both. "
-        "Target actions require calibration. Current executor is a Web simulation.",
+        "Target actions require calibration. get_state reports the executor role; local read-only "
+        "firmware exposes no motion capability.",
         PropertyList({Property("cursor", kPropertyTypeInteger, 0, 0, 12),
                       Property("skill_id", kPropertyTypeString, std::string()).SetMaxLength(16)}),
         [&executor](const PropertyList& args) -> ReturnValue {
@@ -544,6 +545,24 @@ void RegisterLampTools(LampActionExecutor& executor) {
                 lamp::Catalog(args["cursor"].value<int>(), args["skill_id"].value<std::string>())
                     .c_str()));
             cJSON_AddBoolToObject(catalog.get(), "available", executor.Ready());
+            CJsonUniquePtr state(cJSON_Parse(executor.State().c_str()));
+            const auto role = lamp::Text(state.get(), "executor");
+            cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "executor",
+                                                   cJSON_CreateString(role.c_str()));
+            if (role == "local_uart_read_only") {
+                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "primitives",
+                                                       cJSON_CreateArray());
+                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "actions",
+                                                       cJSON_CreateArray());
+                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "controls",
+                                                       cJSON_CreateArray());
+                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "total",
+                                                       cJSON_CreateNumber(0));
+                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "next_cursor",
+                                                       cJSON_CreateNumber(-1));
+                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "execution",
+                                                       cJSON_CreateString("hardware_read_only"));
+            }
             return lamp::Encode(catalog.get());
         });
     mcp.AddTool(
@@ -677,7 +696,7 @@ void RegisterLampTools(LampActionExecutor& executor) {
                                     "target_id", target.c_str());
             return executor.Submit(lamp::Encode(command.get()));
         });
-    ESP_LOGI(kTag, "Semantic lamp MCP tools registered; UART untouched");
+    ESP_LOGI(kTag, "Semantic lamp MCP tools registered; executor owns hardware capability");
 }
 
 void RegisterLampBridgeConfiguration(LampBridgeExecutor& executor) {

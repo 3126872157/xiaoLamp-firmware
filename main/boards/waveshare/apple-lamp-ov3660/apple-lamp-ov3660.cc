@@ -5,6 +5,7 @@
 #include "custom_io_expander_ch32v003.h"
 #include "esp32_camera.h"
 #include "lamp_bridge.h"
+#include "lamp_local_executor.h"
 #include "wifi_board.h"
 
 #include <driver/i2c_master.h>
@@ -20,7 +21,7 @@ private:
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     esp_io_expander_handle_t io_expander_ = nullptr;
     Esp32Camera* camera_ = nullptr;
-    LampBridgeExecutor* lamp_executor_ = nullptr;
+    LampActionExecutor* lamp_executor_ = nullptr;
 
     void InitializeI2c() {
         i2c_master_bus_config_t bus_config = {};
@@ -114,11 +115,20 @@ public:
         InitializeExpander();
         InitializeButtons();
         InitializeCamera();
-        lamp_executor_ = new LampBridgeExecutor(*this);
+#if CONFIG_APPLE_LAMP_LOCAL_EXECUTOR
+        lamp_executor_ = new LampLocalExecutor();
+        ESP_LOGI(TAG, "Firmware role: LOCAL-READONLY; no browser bridge, no movement writes");
+#else
+        auto* bridge = new LampBridgeExecutor(*this);
+        lamp_executor_ = bridge;
+        RegisterLampBridgeConfiguration(*bridge);
+        ESP_LOGI(TAG, "Firmware role: SIMULATOR-BRIDGE; servo UART disabled");
+#endif
         RegisterLampTools(*lamp_executor_);
-        RegisterLampBridgeConfiguration(*lamp_executor_);
         // Board::GetDisplay() provides NoDisplay. No SPI panel/backlight exists.
-        ESP_LOGI(TAG, "No-display board ready; USB console, AEC off, UART not enabled");
+        ESP_LOGI(
+            TAG,
+            "No-display board ready; USB console, AEC off; executor role selected at build time");
     }
 
     AudioCodec* GetAudioCodec() override {
