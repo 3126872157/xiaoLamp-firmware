@@ -182,3 +182,12 @@ MCP 标定要求卸力且 idle，记录完整回读姿态，浏览器 localStora
 覆盖手掰UI、持久化标定、卸力拦截、使能不跳、坐下才卸力；板型编译通过，app 0x26ffd0，
 OTA分区38%空余。格式检查通过。ESP32按用户要求下线，本次未烧录，不能声称新工具实机通过。
 详细控制语义见根项目 docs/mcp_rest_teaching_calibration.md。
+
+
+### 同日重新上线
+
+用户要求连接小智后，已重新通过 COM8 烧录上述新工具版本（配网 NVS 保留）。
+启动观察确认新增 rest/release_torque/enable_torque/record_calibration 注册、
+10.116.90.30 获取 IP、模拟桥 HTTP 200、MQTT 已连接、Activation done 并进入 idle。
+镜像 SHA256：61ac58bb22f87c1f54e85d93b1d1e2e729c6d6121d4f4ca29eb47409c215e84c。
+这是上线检查；休息关闭聊天、再次唤醒、卸力示教标定的真实语音行为仍待用户操作验证。
