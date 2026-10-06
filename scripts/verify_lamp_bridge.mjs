@@ -116,7 +116,12 @@ try {
   const rest = await submit(query('rest')); assert.equal(rest.ok, true, JSON.stringify(rest));
   assert.equal((await waitTask(rest.result.task_id)).status, 'completed');
   const rested = await submit(query('get_state')); assert.equal(rested.result.mode, 'sit'); assert.equal(rested.result.torque_enabled, false);
+  assert.equal(rested.result.pose_rad.baseYaw, measured.baseYaw);
   assert.equal(rested.result.rest_task.task_id, rest.result.task_id);
+  assert.equal((await submit(query('set_torque', { enabled: true }))).ok, true);
+  const initial = await submit(query('execute', { action_id: 'restore_initial' })); assert.equal(initial.ok, true);
+  assert.equal((await waitTask(initial.result.task_id)).status, 'completed');
+  assert.equal((await submit(query('get_state'))).result.pose_rad.baseYaw, 0);
   await page.getByRole('button', { name: '断开模拟桥', exact: true }).click();
   const offline = await http('/v1/commands', query('execute', { action_id: 'execute_primitive', skill_id: 'A01' }));
   assert.equal(offline.status, 503);

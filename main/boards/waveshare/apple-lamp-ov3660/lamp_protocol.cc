@@ -46,7 +46,7 @@ Result Step(const cJSON* step, const cJSON* catalog, bool finite_group) {
         keys = Keys(step, {"action_id", "mode"});
         if (!OneOf(Text(step, "mode"), {"sit", "stand", "work"}))
             return std::unexpected("Invalid mode");
-    } else if (action == "restore_home") {
+    } else if (action == "restore_home" || action == "restore_initial") {
         keys = Keys(step, {"action_id"});
     } else if (action == "adjust_pose") {
         keys = Keys(step, {"action_id", "direction", "size"});
@@ -311,8 +311,8 @@ std::string Catalog(int cursor, const std::string& skill_id) {
     for (auto* key : {"set_torque", "rest", "record_calibration"})
         cJSON_AddItemToArray(controls, cJSON_CreateString(key));
     auto* actions = cJSON_AddArrayToObject(out.get(), "actions");
-    for (auto* key : {"set_mode", "restore_home", "adjust_pose", "gaze_calibrated",
-                      "execute_primitive", "wait"})
+    for (auto* key : {"set_mode", "restore_home", "restore_initial", "adjust_pose",
+                      "gaze_calibrated", "execute_primitive", "wait"})
         cJSON_AddItemToArray(actions, cJSON_CreateString(key));
     return Encode(out.get());
 }

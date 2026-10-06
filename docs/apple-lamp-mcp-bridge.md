@@ -191,3 +191,15 @@ OTA分区38%空余。格式检查通过。ESP32按用户要求下线，本次未
 10.116.90.30 获取 IP、模拟桥 HTTP 200、MQTT 已连接、Activation done 并进入 idle。
 镜像 SHA256：61ac58bb22f87c1f54e85d93b1d1e2e729c6d6121d4f4ca29eb47409c215e84c。
 这是上线检查；休息关闭聊天、再次唤醒、卸力示教标定的真实语音行为仍待用户操作验证。
+
+
+## 标准身体姿态保持Yaw与专用靠近工具
+
+新分支 codex/posture-heading-and-approach 从卸力标定分支继续开发。目录同步了
+restore_initial；set_mode、restore_home、rest、A04由网页保持当前Yaw，显式初始Home才归零。
+增加 self.lamp.approach(target_id=user/book，默认user)，复用 execute A13。
+工具描述明确“靠近我一点”是身体前伸，不能用A03或俯仰微调代替；缺标定提示用户处理。
+真实选词效果仍需语音复测，不能凭协议通过保证云端模型每次理解正确。
+C++协议12项、Web125项通过，板型编译通过，app 0x2702e0（38%空余）；开发时COM8未连接，
+暂未烧录本轮新工具。根项目 docs/posture_heading_and_approach.md 记录了标准姿态来源与
+网页对话/MCP时间线调试面板的后续TODO（本次不实现）。

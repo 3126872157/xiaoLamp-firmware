@@ -141,6 +141,14 @@ class LampProtocolTests(unittest.TestCase):
         self.assertFalse(summary["result"]["torque_enabled"])
         self.assertEqual(summary["result"]["rest_task"]["status"], "completed")
 
+    def test_explicit_initial_home_and_body_approach(self):
+        for step in [{"action_id": "restore_initial"},
+                     {"action_id": "execute_primitive", "skill_id": "A13", "target_id": "user"}]:
+            value = {"protocol_version": "lamp-action/2", "request_id": "heading",
+                     "operation": "execute", "args": step}
+            self.assertEqual(self.run_adapter(value, mode="command")["args"], step)
+        self.run_adapter(self.sequence([{"action_id": "restore_initial", "yaw": 0}]), valid=False)
+
 
 if __name__ == "__main__":
     unittest.main()
