@@ -1,5 +1,6 @@
 #include "lamp_bridge.h"
 
+#include "application.h"
 #include "board.h"
 #include "lamp_protocol.h"
 #include "mcp_server.h"
@@ -47,7 +48,14 @@ bool IsQuery(const std::string& operation) {
     return operation == "get_state" || operation == "get_task" || operation == "discover";
 }
 bool IsControl(const std::string& operation) {
-    return operation == "cancel" || operation == "end_lighting";
+    return operation == "cancel" || operation == "end_lighting" || operation == "set_torque" ||
+           operation == "rest";
+}
+std::string TorqueCommand(const std::string& id, bool enabled) {
+    CJsonUniquePtr command(cJSON_Parse(lamp::Query("set_torque", id).c_str()));
+    cJSON_AddBoolToObject(cJSON_GetObjectItemCaseSensitive(command.get(), "args"), "enabled",
+                          enabled);
+    return lamp::Encode(command.get());
 }
 bool ValidUrl(std::string url) {
     if (url.empty())
@@ -118,6 +126,8 @@ std::string LampBridgeExecutor::Configure(const std::string& url, const std::str
                 record.error = "Bridge configuration changed; no automatic replay";
             }
         queue_.clear();
+        rest_request_.clear();
+        ++rest_generation_;
     }
     if (worker_)
         xTaskNotifyGive(worker_);
@@ -209,20 +219,32 @@ std::string LampBridgeExecutor::Submit(const std::string& command) {
     record.server_session = session_;
     if (IsControl(operation)) {
         auto* args = cJSON_GetObjectItemCaseSensitive(root.get(), "args");
-        if (operation == "cancel" && !args->child) {
+        const bool release = operation == "set_torque" &&
+                             cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(args, "enabled"));
+        if ((operation == "cancel" && !args->child) || operation == "rest" || release) {
             for (auto it = queue_.begin(); it != queue_.end();) {
                 auto& queued = records_.at(*it);
-                if (queued.operation == "execute" || queued.operation == "execute_group") {
+                if (queued.operation == "execute" || queued.operation == "execute_group" ||
+                    queued.operation == "rest" || queued.operation == "set_torque") {
                     queued.delivery = "cancelled_before_dispatch";
                     it = queue_.erase(it);
                 } else
                     ++it;
             }
         }
-        queue_.push_front(id);
+        if (operation == "set_torque" && !release)
+            queue_.push_back(id);
+        else
+            queue_.push_front(id);
     } else
         queue_.push_back(id);
     records_.emplace(id, std::move(record));
+    if (operation == "rest" || operation == "set_torque" || operation == "cancel" ||
+        operation == "execute" || operation == "execute_group") {
+        rest_request_ = operation == "rest" ? id : "";
+        rest_completed_at_ = 0;
+        ++rest_generation_;
+    }
     xTaskNotifyGive(worker_);
     return Receipt(id, records_.at(id));
 }
@@ -350,6 +372,8 @@ void LampBridgeExecutor::Refresh() {
                 record.error = "Bridge restarted; no automatic replay";
             }
         queue_.clear();
+        rest_request_.clear();
+        ++rest_generation_;
     }
     session_ = session;
     sampled_at_ = esp_timer_get_time();
@@ -369,6 +393,37 @@ void LampBridgeExecutor::Refresh() {
     }
     if (ready_ && !was_ready)
         ESP_LOGI(kTag, "Simulator available; authenticated state received (HTTP %d)", status);
+    // Only this device's completed rest may close its chat. Never close on receipt acceptance,
+    // foreign browser rest, or a stale state; never interrupt farewell speech.
+    auto* rest = cJSON_GetObjectItemCaseSensitive(state, "rest_task");
+    if (ready_ && !rest_request_.empty() && lamp::Text(rest, "request_id") == rest_request_) {
+        const auto rest_status = lamp::Text(rest, "status");
+        if (rest_status == "failed" || rest_status == "cancelled" || rest_status == "limited") {
+            rest_request_.clear();
+        } else if (rest_status == "completed" &&
+                   cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(state, "torque_enabled"))) {
+            if (!rest_completed_at_)
+                rest_completed_at_ = esp_timer_get_time();
+            if (esp_timer_get_time() - rest_completed_at_ >= 2000000) {
+                const uint32_t rest_generation = rest_generation_;
+                Application::GetInstance().Schedule([this, rest_generation]() {
+                    std::lock_guard lock(mutex_);
+                    if (rest_generation != rest_generation_ || rest_request_.empty() || !ready_ ||
+                        esp_timer_get_time() - sampled_at_ >= kFreshUs)
+                        return;
+                    auto& app = Application::GetInstance();
+                    if (app.GetDeviceState() == kDeviceStateIdle)
+                        rest_request_.clear();
+                    else if (app.GetDeviceState() == kDeviceStateListening &&
+                             !app.IsVoiceDetected()) {
+                        rest_request_.clear();
+                        app.ToggleChatState();
+                        ESP_LOGI(kTag, "Rest complete; closing chat, wake word remains enabled");
+                    }
+                });
+            }
+        }
+    }
 }
 void LampBridgeExecutor::Process(const std::string& id, bool post) {
     std::string body;
@@ -504,6 +559,12 @@ void RegisterLampTools(LampActionExecutor& executor) {
         "context:{source:'dialogue',turn_id:'stable-turn',cue:'agreement|question|denial|"
         "excitement|regret|emphasis'}. "
         "Cue maps to A01/B02/B01/A02/A03/A16. Skip busy/cooldown, never retry with new IDs. "
+        "Be warmly expressive when context fits: vary agreement/question/excitement/emphasis, "
+        "not only explicit motion orders; at most one automatic expression per turn. "
+        "'Nod once' and 'nod twice' each mean ONE A01 invocation with local default two nods; "
+        "never submit two A01 steps for 'nod twice'. Explicit 3-5 nods use options.repetitions. "
+        "After torque release, enable_torque only on wake or explicit finish-adjusting, before "
+        "motion. "
         "Returns bridge_request_id; queued/answered is NOT motion completion. Poll get_state.",
         PropertyList(
             {Property("sequence_json", kPropertyTypeString).SetMaxLength(lamp::kMaxCommandBytes)}),
@@ -566,6 +627,51 @@ void RegisterLampTools(LampActionExecutor& executor) {
                 PropertyList(), [&executor](const PropertyList&) -> ReturnValue {
                     return executor.Submit(lamp::Query("end_lighting", executor.NewRequestId()));
                 });
+    mcp.AddTool(
+        "self.lamp.rest",
+        "Goodbye/go rest: cancel old motion, move to standard sit, THEN release torque. "
+        "On confirmed completion this device closes the chat after speech and awaits wake word. "
+        "Receipt is not completion; do not close chat before sit succeeds. On wake enable_torque "
+        "then stand. "
+        "For manual adjustment use release_torque instead, without sitting.",
+        PropertyList(), [&executor](const PropertyList&) -> ReturnValue {
+            return executor.Submit(lamp::Query("rest", executor.NewRequestId()));
+        });
+    mcp.AddTool(
+        "self.lamp.release_torque",
+        "User says don't resist/let me move you/calibrate: immediately cancel motion and "
+        "release torque IN PLACE, never sit first. Suppress dialogue motion while unloaded. "
+        "User manually aims, then explicitly asks record_calibration. This executor simulates "
+        "torque only.",
+        PropertyList(), [&executor](const PropertyList&) -> ReturnValue {
+            return executor.Submit(TorqueCommand(executor.NewRequestId(), false));
+        });
+    mcp.AddTool(
+        "self.lamp.enable_torque",
+        "On a new wake after rest or user's explicit finish-adjusting, enable support at "
+        "CURRENT measured pose, never restore an old target. Does not move or stand up. "
+        "Do not automatically enable during teaching. Then use run_sequence for stand/actions.",
+        PropertyList(), [&executor](const PropertyList&) -> ReturnValue {
+            return executor.Submit(TorqueCommand(executor.NewRequestId(), true));
+        });
+    mcp.AddTool(
+        "self.lamp.record_calibration",
+        "Only after user has manually aimed and explicitly says record: store current measured "
+        "joint pose as user(face) or book aim in CURRENT mode and placement. Requires torque "
+        "released and idle. sit:user; stand:user/book; work:book. Does not move or re-enable. "
+        "Saved persistently in Web simulator now; future hardware executor stores locally on "
+        "ESP32.",
+        PropertyList({Property("target_id", kPropertyTypeString).SetMaxLength(8)}),
+        [&executor](const PropertyList& args) -> ReturnValue {
+            const auto target = args["target_id"].value<std::string>();
+            if (target != "user" && target != "book")
+                return Failure("INVALID_REQUEST", "target_id must be user/book");
+            CJsonUniquePtr command(
+                cJSON_Parse(lamp::Query("record_calibration", executor.NewRequestId()).c_str()));
+            cJSON_AddStringToObject(cJSON_GetObjectItemCaseSensitive(command.get(), "args"),
+                                    "target_id", target.c_str());
+            return executor.Submit(lamp::Encode(command.get()));
+        });
     ESP_LOGI(kTag, "Semantic lamp MCP tools registered; UART untouched");
 }
 

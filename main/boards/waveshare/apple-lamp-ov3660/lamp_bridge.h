@@ -49,6 +49,9 @@ private:
     std::string url_, token_, session_, state_;
     std::string transport_error_;
     std::string last_polled_;
+    std::string rest_request_;
+    int64_t rest_completed_at_ = 0;
+    uint32_t rest_generation_ = 0;
     TaskHandle_t worker_ = nullptr;
     int64_t sampled_at_ = 0;
     uint32_t generation_ = 0, counter_ = 0;

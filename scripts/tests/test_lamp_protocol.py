@@ -123,6 +123,24 @@ class LampProtocolTests(unittest.TestCase):
         self.run_adapter('{"protocol_version":"lamp-action/2","request_id":"first","request_id":"second","steps":[]}', valid=False)
         self.run_adapter(" " * 24577, valid=False)
 
+    def test_rest_torque_and_measured_calibration_contract(self):
+        for operation, args in [("rest", {}), ("set_torque", {"enabled": False}),
+                                ("set_torque", {"enabled": True}),
+                                ("record_calibration", {"target_id": "user"})]:
+            value = {"protocol_version": "lamp-action/2", "request_id": "control",
+                     "operation": operation, "args": args}
+            self.assertEqual(self.run_adapter(value, mode="command")["args"], args)
+        for operation, args in [("rest", {"mode": "stand"}), ("set_torque", {"enabled": "false"}),
+                                ("record_calibration", {"target_id": "cup"}),
+                                ("record_calibration", {"target_id": "user", "pose": {}})]:
+            self.run_adapter({"protocol_version": "lamp-action/2", "request_id": "bad-control",
+                              "operation": operation, "args": args}, mode="command", valid=False)
+        summary = self.run_adapter({"ok": True, "result": {"torque_enabled": False, "teaching": True,
+                                   "rest_task": {"request_id": "rest-1", "status": "completed"},
+                                   "target_id": "user", "stored_at": "web_sim", "persistent": True}}, mode="summary")
+        self.assertFalse(summary["result"]["torque_enabled"])
+        self.assertEqual(summary["result"]["rest_task"]["status"], "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -238,7 +238,17 @@ std::expected<std::string, std::string> Command(const std::string& input) {
         if ((operation == "get_task" || cJSON_GetObjectItemCaseSensitive(args, "task_id")) &&
             !ValidId(Text(args, "task_id")))
             return std::unexpected("Invalid task_id");
-    } else if (OneOf(operation, {"discover", "get_state", "end_lighting"})) {
+    } else if (operation == "set_torque") {
+        if (auto result = Keys(args, {"enabled"}); !result)
+            return std::unexpected(result.error());
+        if (!cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(args, "enabled")))
+            return std::unexpected("enabled must be a boolean");
+    } else if (operation == "record_calibration") {
+        if (auto result = Keys(args, {"target_id"}); !result)
+            return std::unexpected(result.error());
+        if (!OneOf(Text(args, "target_id"), {"user", "book"}))
+            return std::unexpected("Calibration target must be user/book");
+    } else if (OneOf(operation, {"discover", "get_state", "end_lighting", "rest"})) {
         if (auto result = Keys(args, {}); !result)
             return std::unexpected(result.error());
     } else
@@ -297,6 +307,9 @@ std::string Catalog(int cursor, const std::string& skill_id) {
                             skill_id.empty() && cursor + 1 < count ? cursor + 1 : -1);
     if (!skill_id.empty() && !def)
         cJSON_AddStringToObject(out.get(), "error", "Unknown primitive");
+    auto* controls = cJSON_AddArrayToObject(out.get(), "controls");
+    for (auto* key : {"set_torque", "rest", "record_calibration"})
+        cJSON_AddItemToArray(controls, cJSON_CreateString(key));
     auto* actions = cJSON_AddArrayToObject(out.get(), "actions");
     for (auto* key : {"set_mode", "restore_home", "adjust_pose", "gaze_calibrated",
                       "execute_primitive", "wait"})
@@ -312,7 +325,8 @@ std::string Summarize(const cJSON* response) {
         auto* brief = cJSON_AddObjectToObject(out.get(), "result");
         for (auto* key :
              {"task_id", "status", "step_index", "total_steps", "reason", "completion_basis",
-              "mode", "busy", "holding", "calibrated_targets", "player_status"})
+              "mode", "busy", "holding", "calibrated_targets", "player_status", "torque_enabled",
+              "teaching", "stored_at", "persistent", "target_id", "rest_task"})
             Copy(brief, result, key);
         auto* active = cJSON_GetObjectItemCaseSensitive(result, "active_task");
         if (cJSON_IsObject(active)) {

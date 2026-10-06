@@ -153,3 +153,32 @@ node scripts/verify_lamp_bridge.mjs
 
 更新目录时，先由 Web 的 export-action-contract.ts 导出，再用 sync_lamp_catalog.py --source
 导入固件并重编，不手工维护第二套参数。两个脚本用途与源版本在固件中可追溯。
+
+
+## 2026-10-06：休息、卸力与标定（未烧录）
+
+在既有固件分支基础上派生 codex/mcp-rest-calibration。增加普通模型可调用工具
+self.lamp.rest、release_torque、enable_torque、record_calibration(target_id=user/book)，
+分别映射 rest、set_torque(false/true)、record_calibration。仍通过 LampActionExecutor 抽象，
+当前只模拟力矩，不修改 UART、不在 ESP 保存真实舵机标定。
+
+休息先通过网页验证路径、切换坐姿，完成后卸力。桥任务只对自己提交的 rest_request_id
+监听新鲜 rest_task=completed 且 torque_enabled=false，再至少等2秒；主任务中仅在
+listening 且未检测到用户语音时 ToggleChatState，等 speaking 自然结束，不从 idle 误唤醒。
+新动作、使能、卸力、取消、桥配置变化或服务器会话变化会撤销旧休息的关闭聊天请求。
+正在说话时不会强行截断；长期一直说话或网页失联时不会假报成功或强行关闭。
+此行为与真实麦克风、云端 TTS 的联动尚需设备重新上线测试。
+
+卸力取消当前运动，取消未派发的旧运动／使能；使能保持当前姿态，不自动站起。
+MCP 标定要求卸力且 idle，记录完整回读姿态，浏览器 localStorage 保存失败报错回滚。
+真机移植时由硬件执行器确认全舵机反馈、卸力／上力状态，并存 ESP 本地配置，不用目标值
+代替反馈，也不让模型传角度或坐标。
+
+工具描述增加更热情的自主表达、点一次／点两下均一次 A01 调用（默认两次）、
+明确3–5次才使用 repetitions；仍一轮最多一次、冷却、busy跳过、卸力禁动。
+云端角色设定可采用根项目 research/lamp_dialogue_mcp_instructions.md，未自动修改云端设定。
+
+验证：11项生产协议测试通过，Web 123项与HTTP中继6项通过；C++→HTTP→真实浏览器集成
+覆盖手掰UI、持久化标定、卸力拦截、使能不跳、坐下才卸力；板型编译通过，app 0x26ffd0，
+OTA分区38%空余。格式检查通过。ESP32按用户要求下线，本次未烧录，不能声称新工具实机通过。
+详细控制语义见根项目 docs/mcp_rest_teaching_calibration.md。
