@@ -5,10 +5,12 @@
 #include "mcp_server.h"
 #include "settings.h"
 
+#include <esp_crt_bundle.h>
+#include <esp_http_client.h>
 #include <esp_log.h>
+#include <esp_netif.h>
 #include <esp_random.h>
 #include <esp_timer.h>
-#include <esp_wifi.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -269,43 +271,55 @@ std::string LampBridgeExecutor::HttpRequest(const std::string& method, const std
         generation = generation_;
     }
     status = 0;
-    auto http = board_.GetNetwork()->CreateHttp(4);
-    if (!http || url.empty())
+    if (url.empty())
         return {};
-    http->SetTimeout(1500);
-    http->SetHeader("Content-Type", "application/json");
-    if (!token.empty())
-        http->SetHeader("Authorization", "Bearer " + token);
-    if (!body.empty())
-        http->SetContent(std::string(body));
-    if (!http->Open(method, url + path))
-        return {};
-    auto code = http->GetStatusCode();
-    if (!code) {
-        http->Close();
-        return {};
-    }
-    status = *code;
-    std::string data;
-    char buffer[1024];
-    while (true) {
-        auto read = http->Read(buffer, sizeof(buffer));
-        if (!read || *read < 0) {
-            data.clear();
-            status = 0;
-            break;
+    // The upstream EspTcp may destroy its callback owner before its receive task
+    // has exited on passive close. Keep this board's HTTP entirely synchronous in
+    // the bridge worker; MQTT/audio continue to use the existing network stack.
+    struct Response {
+        std::string data;
+        bool oversized = false;
+    } response;
+    const std::string request_url = url + path;
+    esp_http_client_config_t config = {};
+    config.url = request_url.c_str();
+    config.timeout_ms = 1500;
+    config.disable_auto_redirect = true;
+#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+#endif
+    config.user_data = &response;
+    config.event_handler = [](esp_http_client_event_t* event) -> esp_err_t {
+        if (event->event_id != HTTP_EVENT_ON_DATA || event->data_len <= 0)
+            return ESP_OK;
+        auto* out = static_cast<Response*>(event->user_data);
+        if (out->data.size() + static_cast<size_t>(event->data_len) > kMaxResponse) {
+            out->oversized = true;
+            return ESP_FAIL;
         }
-        if (*read == 0)
-            break;
-        if (data.size() + *read > kMaxResponse) {
-            data.clear();
-            status = 0;
-            break;
-        }
-        data.append(buffer, *read);
-    }
-    http->Close();
-    return data;
+        out->data.append(static_cast<const char*>(event->data), event->data_len);
+        return ESP_OK;
+    };
+    auto http = esp_http_client_init(&config);
+    if (!http)
+        return {};
+    esp_err_t error =
+        esp_http_client_set_method(http, method == "POST" ? HTTP_METHOD_POST : HTTP_METHOD_GET);
+    if (error == ESP_OK)
+        error = esp_http_client_set_header(http, "Content-Type", "application/json");
+    const std::string authorization = "Bearer " + token;
+    if (error == ESP_OK && !token.empty())
+        error = esp_http_client_set_header(http, "Authorization", authorization.c_str());
+    if (error == ESP_OK && method == "POST")
+        error = esp_http_client_set_post_field(http, body.data(), body.size());
+    if (error == ESP_OK)
+        error = esp_http_client_perform(http);
+    if (error == ESP_OK && !response.oversized)
+        status = esp_http_client_get_status_code(http);
+    esp_http_client_cleanup(http);
+    if (error != ESP_OK || response.oversized)
+        return {};
+    return response.data;
 }
 void LampBridgeExecutor::Refresh() {
     int status;
@@ -315,6 +329,7 @@ void LampBridgeExecutor::Refresh() {
     std::lock_guard lock(mutex_);
     if (generation != generation_)
         return;
+    const bool was_ready = ready_;
     if (status != 200 || !root ||
         !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(root.get(), "stale"))) {
         ready_ = false;
@@ -352,6 +367,8 @@ void LampBridgeExecutor::Refresh() {
         ready_ = false;
         state_.clear();
     }
+    if (ready_ && !was_ready)
+        ESP_LOGI(kTag, "Simulator available; authenticated state received (HTTP %d)", status);
 }
 void LampBridgeExecutor::Process(const std::string& id, bool post) {
     std::string body;
@@ -408,13 +425,15 @@ void LampBridgeExecutor::Loop() {
     vTaskDelay(pdMS_TO_TICKS(1000));
     int64_t refresh_at = 0;
     while (true) {
-        wifi_ap_record_t ap;
+        auto* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        esp_netif_ip_info_t ip = {};
         bool configured;
         {
             std::lock_guard lock(mutex_);
             configured = !url_.empty();
         }
-        if (configured && esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        if (configured && netif && esp_netif_is_netif_up(netif) &&
+            esp_netif_get_ip_info(netif, &ip) == ESP_OK && ip.ip.addr != 0) {
             if (esp_timer_get_time() >= refresh_at) {
                 Refresh();
                 refresh_at = esp_timer_get_time() + 2000000;

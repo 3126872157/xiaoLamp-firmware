@@ -1,8 +1,22 @@
 # Apple Lamp：设备端 MCP → 网页执行器
 
 2026-10-06。基于小智 2.5.1 / ESP-IDF 6.1，仅接入 `apple-lamp-ov3660` 板型。
-本轮固件已经编译，生产 C++ 语义转换器与真实网页闭环已测试；没有烧录，ESP 网络传输、
-官方 Agent 实际调用、声学稳定性与任务内存预算仍待硬件验证。网页完成依据始终是 simulation。
+本轮固件已于2026-10-06通过 COM8 烧录。实机确认热点配网保留、MCP 工具注册、
+HTTP 200 鉴权状态读取及云端 MQTT 上线。官方 Agent 实际语音调用、长期声学稳定性与
+任务内存预算仍待用户实测。网页完成依据始终是 simulation。
+
+实机曾暴露旧 EspTcp 被动关闭时的回调生命周期崩溃；桥 HTTP 已改为 ESP-IDF 原生同步
+客户端，在独立桥任务中执行，并等到 STA 有有效 IP 才发请求。未修改 vendor、MQTT 或音频实现。
+新增 `esp_http_client` 的组件依赖，保持1.5秒超时、64KiB响应上限、禁止自动重定向及原有去重语义。
+首次添加可选的本地配置头时，ccache 可能保留旧 `__has_include` 结果；构建前设置
+`$env:CCACHE_DISABLE='1'`，再配置并编译，烧录前须检查镜像确实包含本次地址与令牌，勿打印令牌。
+
+最终 application 镜像 SHA256：
+`116379F1EDEB1092F9F60AF12A258CCD0D181FBF74E24C0EBC4177C883B2DC0D`。
+这份位于 `build/xiaozhi.bin`，使用分离镜像烧录；下文历史 releases 合并产物不是本次最终配置版。
+日志见忽略的 `build/hotspot-mcp-flash-final.log` 与 `build/hotspot-mcp-boot-final.log`。
+生产 C++ 协议10项测试通过，板型编译与格式检查通过。完整宿主套件108项出现12项
+Windows临时目录占用／Bash路径与编码问题，未把该套件报告为全通过。
 
 ## 已实现的接口
 
