@@ -141,6 +141,11 @@ public:
     }
 
 #if CONFIG_APPLE_LAMP_TWIN_WEB
+    void RecordDiagnostic(const std::string& kind, const std::string& name,
+                          const std::string& data) override {
+        if (lamp_executor_)
+            static_cast<LampHardwareExecutor*>(lamp_executor_)->RecordDiagnostic(kind, name, data);
+    }
     void SetNetworkEventCallback(NetworkEventCallback callback) override {
         WifiBoard::SetNetworkEventCallback(
             [this, callback = std::move(callback)](NetworkEvent event, const std::string& data) {

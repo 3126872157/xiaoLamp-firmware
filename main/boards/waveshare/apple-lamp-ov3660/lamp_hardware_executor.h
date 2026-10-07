@@ -9,10 +9,21 @@ public:
     std::string Inspect(const std::string& request_id) override;
     std::string State() override;
     bool Ready() override;
+    void RecordDiagnostic(const std::string& kind, const std::string& name,
+                          const std::string& data);
+    std::string Diagnostics(uint64_t after = 0);
     std::string PanelSubmit(const std::string& body);
     std::string PanelConfig(const std::string& candidate = "");
 
 private:
+    struct Diagnostic {
+        uint64_t sequence;
+        std::string json;
+    };
+    std::mutex diagnostic_mutex_;
+    std::deque<Diagnostic> diagnostics_;
+    uint64_t diagnostic_sequence_ = 0;
+    size_t diagnostic_bytes_ = 0;
     struct Record {
         std::string signature, operation, status, reason;
         unsigned step = 0, total = 0;

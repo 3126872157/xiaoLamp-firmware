@@ -312,6 +312,24 @@ int main() {
     assert(Wait(*e, "field-enable") == "completed");
     Submit(*e, "field-home", "execute", R"({"action_id":"restore_home"})");
     assert(Wait(*e, "field-home") == "completed");
+    // Ring journal: bounded replay, explicit eviction, UTF-8 safe truncation.
+    for (int i = 0; i < 150; i++)
+        e->RecordDiagnostic("user", "speech", "测试");
+    auto history = Json(e->Diagnostics());
+    assert(cJSON_IsTrue(Item(history.get(), "gap")));
+    assert(cJSON_GetArraySize(Item(history.get(), "events")) == 8);
+    auto cursor = Item(history.get(), "cursor")->valuedouble;
+    auto next = Json(e->Diagnostics(static_cast<uint64_t>(cursor)));
+    assert(Item(cJSON_GetArrayItem(Item(next.get(), "events"), 0), "sequence")->valuedouble >
+           cursor);
+
+    const auto latest = Item(next.get(), "latest")->valuedouble;
+    e->RecordDiagnostic("assistant", "speech", std::string(4095, 'x') + "测试");
+    auto truncated = Json(e->Diagnostics(static_cast<uint64_t>(latest)));
+    const auto* event = cJSON_GetArrayItem(Item(truncated.get(), "events"), 0);
+    assert(cJSON_IsTrue(Item(event, "truncated")));
+    assert(lamp::Text(event, "data").size() == 4095);
+
     {
         std::lock_guard l(bus_mutex);
         before = writes[1];

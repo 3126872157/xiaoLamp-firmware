@@ -11,7 +11,7 @@ inline constexpr const char* kLampTwinPage = R"lamppage(<!doctype html>
 <p class="muted">蓝色：目标预览　绿色：实际反馈<br>关节中心连线含安装偏移；J3＝0 不代表两段连线垂直。省略 Yaw 与末端旋转，不表示碰撞检测结果。</p>
 <svg id="view" viewBox="0 0 620 430" preserveAspectRatio="xMidYMid meet" aria-label="台灯侧视连杆示意图"><path d="M20 398H600" stroke="#465974"/><rect x="260" y="386" width="100" height="12" rx="5" fill="#6a7c93"/><g id="target"/><g id="actual"/></svg>
 <div class="buttons"><span id="yaw" class="tag">Yaw —</span><span id="roll" class="tag">末端旋转 —</span></div></section>
-<details><summary>五轴反馈与诊断</summary><div id="feedback">等待反馈…</div><button id="export">导出本页日志</button><pre id="raw"></pre></details></div>
+<details><summary>五轴反馈与诊断</summary><div id="feedback">等待反馈…</div><button id="export">导出本页日志</button><pre id="raw"></pre></details><details open><summary>对话与工具调用历史</summary><p class="muted">记录本次开机的语音文字、台灯 MCP 调用和任务结果。设备保留最近 64 KiB／128 条，长结果会注明截断；浏览器保留最近 500 条。重启清空设备记录。</p><button id="export-history">导出对话记录</button><pre id="history"></pre></details></div>
 <div><section><b id="status">正在连接设备…</b><p id="message" role="status">页面打开不会使能或运动。</p>
 <div class="buttons"><button id="acquire">进入手动测试</button><button id="release">退出手动测试</button></div>
 <div class="buttons"><button id="enable">保持当前位置并使能</button><button id="stop" class="danger">停止</button><button id="off" class="danger">卸力 · 先扶住灯臂</button></div><small>手动测试期间暂停 MCP 动作；退出不自动卸力。使能前先确认安装映射。</small></section>
@@ -23,6 +23,7 @@ inline constexpr const char* kLampTwinPage = R"lamppage(<!doctype html>
 <div id="calibration"></div><div class="buttons"><button id="preview">检查候选映射</button><button id="save" class="primary">保存安装映射</button><button id="reload">恢复设备配置</button></div><pre id="mapping-preview"></pre></details></div></main>
 <script>
 const token='__TOKEN__',D=180/Math.PI,names=['底座 Yaw','底座俯仰','臂部俯仰','灯头俯仰','末端旋转'];
+let historyEvents=[],historyCursor=0,historyLatest=0;
 let directionStart=[],config,state,target=null,logs=[],requestCounter=0,busy=0,online=false;
 const $=id=>document.getElementById(id),fmt=x=>Number.isFinite(x)?x.toFixed(1):'—';
 function actualPose(){return config?.mapping.map(m=>state?.pose_rad?.[m.joint])}
@@ -53,5 +54,9 @@ $('preview').onclick=safe(async()=>{const result=await api('calibration/preview'
 $('save').onclick=safe(async()=>{if(!confirm('保存安装映射将清除旧的人脸／书本目标标定，并关闭运动授权。继续？'))return;await command('install',{mapping:mapping(),clear_targets:true});await load();await refresh();$('sync').click()});
 $('reload').onclick=safe(async()=>{await load();tell('已恢复设备映射；没有改变力矩。')});
 $('export').onclick=()=>{const blob=new Blob([JSON.stringify({config,state,logs},null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='lamp-twin-diagnostic.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)};
+function historyText(){return historyEvents.map(e=>`[开机 ${ (e.uptime_ms/1000).toFixed(2)}s] ${e.kind} ${e.name}\n${e.data}${e.truncated?"\n[内容截断]":""}`).join("\n\n")}
+async function refreshHistory(){try{const r=await api("history?after="+historyCursor);if(r.latest<historyLatest){historyCursor=0;historyEvents=[];historyLatest=r.latest;return}historyLatest=r.latest;if(r.gap)historyEvents.push({uptime_ms:0,kind:"notice",name:"记录缺口",data:"较早记录已被设备环形缓冲覆盖"});historyCursor=r.cursor;historyEvents.push(...r.events);historyEvents=historyEvents.slice(-500);$("history").textContent=historyText()}catch(e){$("history").textContent="历史读取失败："+String(e)}}
+$("export-history").onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([historyText()],{type:"text/plain;charset=utf-8"}));a.download="lamp-conversation.txt";a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)};
+setInterval(refreshHistory,1000);
 (async()=>{try{await load();await refresh();if(state?.available){target=actualPose();target.forEach((q,i)=>setJoint(i,q*D*config.mapping[i].display_sign))}}catch(e){tell(String(e))}while(true){await new Promise(r=>setTimeout(r,500));await refresh()}})();
 </script></html>)lamppage";

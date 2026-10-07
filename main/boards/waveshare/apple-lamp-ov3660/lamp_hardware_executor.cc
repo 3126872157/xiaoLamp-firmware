@@ -525,6 +525,7 @@ std::string LampHardwareExecutor::SubmitChecked(const std::string& body, bool pa
     records_[id] = {sig, op, "accepted", "Awaiting local worker"};
     order_.push_back(id);
     queued_ = body;
+    RecordDiagnostic("task", id, Receipt(id, records_[id]));
     return Receipt(id, records_[id]);
 }
 std::string LampHardwareExecutor::State() {
@@ -793,6 +794,49 @@ bool LampHardwareExecutor::Play(const lamp::pose::Plan& plan, uint32_t token) {
             " ID" + std::to_string(i + 1) + "=" + std::to_string(servos_[i].position - (*ticks)[i]);
     return false;
 }
+void LampHardwareExecutor::RecordDiagnostic(const std::string& kind, const std::string& name,
+                                            const std::string& data) {
+    std::lock_guard lock(diagnostic_mutex_);
+    CJsonUniquePtr event(cJSON_CreateObject());
+    cJSON_AddNumberToObject(event.get(), "sequence", ++diagnostic_sequence_);
+    cJSON_AddNumberToObject(event.get(), "uptime_ms", esp_timer_get_time() / 1000);
+    cJSON_AddStringToObject(event.get(), "kind", kind.c_str());
+    cJSON_AddStringToObject(event.get(), "name", name.substr(0, 128).c_str());
+    size_t length = std::min(data.size(), size_t(4096));
+    while (length < data.size() && length > 0 &&
+           (static_cast<unsigned char>(data[length]) & 0xc0) == 0x80)
+        --length;
+    cJSON_AddBoolToObject(event.get(), "truncated", length < data.size());
+    cJSON_AddStringToObject(event.get(), "data", data.substr(0, length).c_str());
+    auto json = lamp::Encode(event.get());
+    diagnostic_bytes_ += json.size();
+    diagnostics_.push_back({diagnostic_sequence_, std::move(json)});
+    while (diagnostics_.size() > 128 || diagnostic_bytes_ > 65536) {
+        diagnostic_bytes_ -= diagnostics_.front().json.size();
+        diagnostics_.pop_front();
+    }
+}
+std::string LampHardwareExecutor::Diagnostics(uint64_t after) {
+    std::lock_guard lock(diagnostic_mutex_);
+    CJsonUniquePtr root(cJSON_CreateObject());
+    cJSON_AddBoolToObject(root.get(), "ok", true);
+    cJSON_AddBoolToObject(root.get(), "gap",
+                          !diagnostics_.empty() && after + 1 < diagnostics_.front().sequence);
+    auto* events = cJSON_AddArrayToObject(root.get(), "events");
+    uint64_t cursor = after;
+    unsigned count = 0;
+    for (const auto& event : diagnostics_) {
+        if (event.sequence <= after)
+            continue;
+        cJSON_AddItemToArray(events, cJSON_Parse(event.json.c_str()));
+        cursor = event.sequence;
+        if (++count == 8)
+            break;
+    }
+    cJSON_AddNumberToObject(root.get(), "cursor", cursor);
+    cJSON_AddNumberToObject(root.get(), "latest", diagnostic_sequence_);
+    return lamp::Encode(root.get());
+}
 void LampHardwareExecutor::Finish(const std::string& id, const std::string& status,
                                   const std::string& reason) {
     std::lock_guard lock(mutex_);
@@ -800,6 +844,7 @@ void LampHardwareExecutor::Finish(const std::string& id, const std::string& stat
     r.status = status;
     r.reason = reason;
     active_.clear();
+    RecordDiagnostic("task", id, Receipt(id, r));
 }
 bool LampHardwareExecutor::RecordCalibration(const std::string& target, uint32_t token) {
     lamp::pose::Pose q;
@@ -927,6 +972,7 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
                 "运动未授权：使能未完成，或故障/卸力/保存映射/"
                 "退出手动控制已关闭授权；请检查后重新使能";
             active_.clear();
+            RecordDiagnostic("task", id, Receipt(id, records_.at(id)));
             return;
         }
     }

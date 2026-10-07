@@ -65,6 +65,9 @@ public:
     }
 
     virtual ~Board() = default;
+    // Optional bounded local diagnostics; never changes protocol or device state.
+    virtual void RecordDiagnostic(const std::string& kind, const std::string& name,
+                                  const std::string& data) {}
     virtual std::string GetBoardType() = 0;
     virtual std::string GetUuid() { return uuid_; }
     virtual Backlight* GetBacklight() { return nullptr; }

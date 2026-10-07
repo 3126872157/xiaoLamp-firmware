@@ -53,6 +53,18 @@ esp_err_t Api(httpd_req_t* req) {
     std::string path(req->uri);
     path = path.substr(0, path.find('?'));
     if (req->method == HTTP_GET) {
+        if (path == "/api/lamp/history") {
+            char query[64]{}, value[24]{};
+            uint64_t after = 0;
+            if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+                httpd_query_key_value(query, "after", value, sizeof(value)) == ESP_OK) {
+                char* end = nullptr;
+                after = strtoull(value, &end, 10);
+                if (!end || *end || after > 9007199254740991ULL)
+                    return Json(req, "{\"ok\":false}");
+            }
+            return Json(req, device->Diagnostics(after));
+        }
         if (path == "/api/lamp/state")
             return Json(req, device->State());
         if (path == "/api/lamp/config")

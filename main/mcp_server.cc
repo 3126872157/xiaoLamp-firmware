@@ -487,6 +487,7 @@ void McpServer::ReplyResult(int id, const std::string& result,
 
 void McpServer::ReplyError(int id, int code, const std::string& message,
                            const ResponseSender& response_sender) {
+    Board::GetInstance().RecordDiagnostic("rpc_error", std::to_string(id), message);
     std::string payload = "{\"jsonrpc\":\"2.0\",\"id\":";
     payload += std::to_string(id);
     payload += ",\"error\":{\"code\":";
@@ -563,6 +564,12 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
 
 void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments,
                            ResponseSender response_sender) {
+    if (tool_name.starts_with("self.lamp.")) {
+        char* json = cJSON_PrintUnformatted(tool_arguments);
+        Board::GetInstance().RecordDiagnostic("tool_call", tool_name + " #" + std::to_string(id),
+                                              json ? json : "{}");
+        cJSON_free(json);
+    }
     auto tool_iter = std::find_if(tools_.begin(), tools_.end(), [&tool_name](const auto& tool) {
         return tool->name() == tool_name;
     });
@@ -613,9 +620,13 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
 
     // Use main thread to call the tool
     auto& app = Application::GetInstance();
-    app.Schedule([this, id, tool, arguments = std::move(arguments),
+    app.Schedule([this, id, tool, tool_name, arguments = std::move(arguments),
                   response_sender = std::move(response_sender)]() {
         auto result = tool->Call(arguments);
+        if (tool_name.starts_with("self.lamp."))
+            Board::GetInstance().RecordDiagnostic(result ? "tool_result" : "tool_error",
+                                                  tool_name + " #" + std::to_string(id),
+                                                  result ? *result : result.error());
         if (!result) {
             ESP_LOGE(TAG, "tools/call: %s", result.error().c_str());
             ReplyError(id, result.error(), response_sender);
