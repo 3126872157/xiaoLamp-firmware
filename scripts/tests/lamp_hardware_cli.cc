@@ -1,4 +1,5 @@
 // Exercise production executor against a deterministic bus/device simulator, NOT physical hardware.
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -19,7 +20,7 @@ std::atomic<bool> halt = false;
 int position[] = {500, 834, 130, 625, 500}, target[] = {500, 834, 130, 625, 500}, torque[5] = {},
     mode[5] = {1, 0, 0, 0, 0};
 unsigned writes[256] = {};
-int drop_id = 0;
+int drop_id = 0, offsets[5] = {}, drop_limits = 0;
 bool frozen = false, nvs_fail = false;
 std::string saved, installation;
 const auto boot = std::chrono::steady_clock::now();
@@ -113,7 +114,7 @@ int uart_write_bytes(int, const void* raw, size_t count) {
         writes[1]++;
         target[i] = lamp::bus::Word(data);
         if (torque[i] && !frozen)
-            position[i] = target[i];
+            position[i] = std::clamp(target[i] + offsets[i], 0, 1000);
     } else if (p.command == 12)
         writes[12]++;
     else if (p.command == 29) {
@@ -123,10 +124,14 @@ int uart_write_bytes(int, const void* raw, size_t count) {
         writes[31]++;
         torque[i] = data[0];
         if (torque[i] && !frozen)
-            position[i] = target[i];
+            position[i] = std::clamp(target[i] + offsets[i], 0, 1000);
     } else {
         assert(p.command == 21 || p.command == 26 || p.command == 27 || p.command == 28 ||
                p.command == 30 || p.command == 32);
+        if (p.command == 21 && drop_limits > 0) {
+            --drop_limits;
+            return count;
+        }
         if (drop_id == int(p.id))
             return count;
         unsigned value = p.command == 28   ? position[i]
@@ -216,6 +221,14 @@ Application& Application::GetInstance() {
     return app;
 }
 int main() {
+    auto cfg = lamp::pose::ParseConfiguration(lamp::pose::kDeviceConfiguration);
+    auto yaw_step =
+        Json(R"({"action_id":"adjust_pose","direction":"yaw_negative","size":"small"})");
+    auto yaw_plan = lamp::pose::Build(*cfg, 0, cfg->modes[1].home, yaw_step.get());
+    assert(yaw_plan.ok);  // old sit mode must not block pure yaw of a standing body
+    auto yaw_end = yaw_plan.At(yaw_plan.Duration());
+    for (int j = 1; j < 5; j++)
+        assert(std::abs(yaw_end[j] - cfg->modes[1].home[j]) < 1e-8);
     auto* e = new LampHardwareExecutor();
     assert(e->Ready());
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
@@ -256,6 +269,49 @@ int main() {
     assert(cJSON_IsTrue(Item(Json(e->State()).get(), "motion_enabled")));
     Submit(*e, "nod-again", "execute", R"({"action_id":"execute_primitive","skill_id":"A01"})");
     assert(Wait(*e, "nod-again") == "completed");
+    // Replay the field log: stand elbow error 7 ticks, sit wrist error 4 ticks.
+    {
+        std::lock_guard l(bus_mutex);
+        offsets[2] = -7;
+        offsets[3] = -4;
+    }
+    Submit(*e, "field-stand", "execute", R"({"action_id":"set_mode","mode":"stand"})");
+    assert(Wait(*e, "field-stand") == "completed");
+    auto standing = Json(e->State());
+    assert(lamp::Text(standing.get(), "mode") == "stand");
+    assert(cJSON_IsTrue(Item(standing.get(), "motion_enabled")));
+    {
+        std::lock_guard l(bus_mutex);
+        drop_limits = 1;
+    }
+    Submit(*e, "field-yaw", "execute",
+           R"({"action_id":"adjust_pose","direction":"yaw_negative","size":"small"})");
+    assert(Wait(*e, "field-yaw") == "completed");
+    {
+        std::lock_guard l(bus_mutex);
+        drop_limits = 100;
+        before = writes[1];
+    }
+    Submit(*e, "field-limit-fail", "execute",
+           R"({"action_id":"adjust_pose","direction":"yaw_negative","size":"small"})");
+    assert(Wait(*e, "field-limit-fail") == "failed");
+    assert(cJSON_IsTrue(Item(Json(e->State()).get(), "motion_enabled")));
+    {
+        std::lock_guard l(bus_mutex);
+        drop_limits = 0;
+        assert(writes[1] == before);
+    }
+    Submit(*e, "field-rest", "rest");
+    assert(Wait(*e, "field-rest") == "completed");
+    {
+        std::lock_guard l(bus_mutex);
+        offsets[2] = 0;
+        offsets[3] = 0;
+    }
+    Submit(*e, "field-enable", "set_torque", R"({"enabled":true})");
+    assert(Wait(*e, "field-enable") == "completed");
+    Submit(*e, "field-home", "execute", R"({"action_id":"restore_home"})");
+    assert(Wait(*e, "field-home") == "completed");
     {
         std::lock_guard l(bus_mutex);
         before = writes[1];
@@ -316,6 +372,9 @@ int main() {
     Submit(*reboot, "unreached", "execute",
            R"({"action_id":"adjust_pose","direction":"up","size":"medium"})");
     assert(Wait(*reboot, "unreached") == "failed");
+    assert(cJSON_IsTrue(Item(Json(reboot->State()).get(), "motion_enabled")));
+    assert(lamp::Text(Item(Json(reboot->Inspect("unreached")).get(), "result"), "reason")
+               .find("residual ticks") != std::string::npos);
     {
         std::lock_guard l(bus_mutex);
         frozen = false;

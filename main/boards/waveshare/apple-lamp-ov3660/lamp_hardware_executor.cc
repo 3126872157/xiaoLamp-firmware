@@ -762,24 +762,35 @@ bool LampHardwareExecutor::Play(const lamp::pose::Plan& plan, uint32_t token) {
     }
     const auto end = plan.At(plan.Duration());
     const auto ticks = lamp::pose::ToTicks(*configuration_, end);
-    int good = 0;
-    const auto deadline = esp_timer_get_time() + 3000000;
+    // 10 ticks = 2.4 degrees: allow loaded-servo tracking error, not arbitrary poses.
+    constexpr int tolerance_ticks = 10;
+    int64_t settled_since = 0;
+    const auto deadline = esp_timer_get_time() + 5000000;
     while (esp_timer_get_time() < deadline) {
         if (epoch_ != token || !Positions(actual))
             return false;
         for (unsigned i = 0; i < 5; i++)
-            if (!Read(i, 32) || servos_[i].torque != 1)
+            if (!ConfirmedRead(i, 32) || servos_[i].torque != 1) {
+                io_error_ = "ID " + std::to_string(i + 1) + " endpoint torque feedback failed";
                 return false;
+            }
         bool at = true;
         for (int j = 0; j < 5; j++)
-            at &= std::abs(servos_[j].position - (*ticks)[j]) <= 3;
+            at &= std::abs(servos_[j].position - (*ticks)[j]) <= tolerance_ticks;
         if (at) {
-            if (++good >= 3)
+            if (!settled_since)
+                settled_since = esp_timer_get_time();
+            if (esp_timer_get_time() - settled_since >= 200000)
                 return true;
         } else
-            good = 0;
+            settled_since = 0;
         vTaskDelay(pdMS_TO_TICKS(60));
     }
+    endpoint_timeout_ = true;
+    io_error_ = "Endpoint timeout (5 seconds, tolerance 10 ticks); residual ticks:";
+    for (unsigned i = 0; i < 5; i++)
+        io_error_ +=
+            " ID" + std::to_string(i + 1) + "=" + std::to_string(servos_[i].position - (*ticks)[i]);
     return false;
 }
 void LampHardwareExecutor::Finish(const std::string& id, const std::string& status,
@@ -847,6 +858,7 @@ bool LampHardwareExecutor::RecordCalibration(const std::string& target, uint32_t
 }
 void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
     io_error_.clear();
+    endpoint_timeout_ = false;
     CJsonUniquePtr root(cJSON_Parse(body.c_str()));
     const auto id = lamp::Text(root.get(), "request_id"), op = lamp::Text(root.get(), "operation");
     const auto* args = Item(root.get(), "args");
@@ -855,10 +867,10 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
         records_.at(id).status = "running";
     }
     auto failure = [&](const std::string& why) {
-        StopMotors();
+        const bool stopped = StopMotors();
         {
             std::lock_guard lock(mutex_);
-            if (epoch_ == token)
+            if (epoch_ == token && (!endpoint_timeout_ || !stopped))
                 armed_ = false;
         }
         Finish(id, epoch_ == token ? "failed" : "cancelled", why);
@@ -924,13 +936,15 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
         return;
     }
     for (unsigned i = 0; i < 5; i++)
-        if (!Read(i, 30) || servos_[i].mode != 0 || !Read(i, 32) || servos_[i].torque != 1) {
+        if (!ConfirmedRead(i, 30) || servos_[i].mode != 0 || !ConfirmedRead(i, 32) ||
+            servos_[i].torque != 1) {
             failure("Five servos must be in position mode with torque enabled");
             return;
         }
     for (unsigned i = 0; i < 5; i++)
-        if (!Read(i, 21)) {
-            failure("Cannot read servo internal position limits");
+        if (!ConfirmedRead(i, 21)) {
+            reject(io_error_.empty() ? "Cannot read servo internal position limits; no motion sent"
+                                     : io_error_);
             return;
         }
     if (op == "move") {
@@ -961,7 +975,8 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
         phase.duration = Item(args, "duration_sec")->valuedouble;
         plan.phases.push_back(phase);
         if (!Play(plan, token)) {
-            failure("Manual movement interrupted or endpoint not confirmed");
+            failure(io_error_.empty() ? "Manual movement interrupted or endpoint not confirmed"
+                                      : io_error_);
             return;
         }
         Finish(id, "completed", "Manual target confirmed from actual feedback");
@@ -1027,9 +1042,7 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
     }
     for (unsigned i = 0; i < plans.size(); i++) {
         if (epoch_ != token || !Play(plans[i], token)) {
-            failure(
-                "Motion interrupted, transport failure or final position not reached within 3 "
-                "seconds");
+            failure(io_error_.empty() ? "Motion interrupted or feedback unavailable" : io_error_);
             return;
         }
         {

@@ -558,7 +558,10 @@ Plan Build(const Configuration& config, int mode, const Pose& current, const cJS
             plan.ok = true;
             return plan;
         }
-        if (!InMode(current, profile))
+        const bool yaw_adjust =
+            action == "adjust_pose" && (Text(step, "direction") == "yaw_positive" ||
+                                        Text(step, "direction") == "yaw_negative");
+        if (!yaw_adjust && !InMode(current, profile))
             throw std::runtime_error("Current pose outside mode; restore Home first");
         if (action == "adjust_pose" || action == "gaze_calibrated") {
             auto target = current;
@@ -573,8 +576,13 @@ Plan Build(const Configuration& config, int mode, const Pose& current, const cJS
                 const int j = d == "up" || d == "down" ? 3 : 0;
                 const double requested = current[j] + delta;
                 target[j] = std::clamp(
-                    requested, std::max(kJoints[j].lower, profile.home[j] + profile.ranges[j].min),
-                    std::min(kJoints[j].upper, profile.home[j] + profile.ranges[j].max));
+                    requested,
+                    yaw_adjust
+                        ? kJoints[j].lower
+                        : std::max(kJoints[j].lower, profile.home[j] + profile.ranges[j].min),
+                    yaw_adjust
+                        ? kJoints[j].upper
+                        : std::min(kJoints[j].upper, profile.home[j] + profile.ranges[j].max));
                 plan.limited = !Close(requested, target[j]);
                 if (!Path(current, target, config.obstacles)) {
                     if (!Safe(current, config.obstacles))
@@ -591,7 +599,7 @@ Plan Build(const Configuration& config, int mode, const Pose& current, const cJS
                     plan.limited = true;
                 }
             }
-            if (!InMode(target, profile))
+            if (!yaw_adjust && !InMode(target, profile))
                 throw std::runtime_error("Target outside mode");
             route(target, mode, action == "adjust_pose" ? .6 : 1.8, true);
             plan.ok = true;
