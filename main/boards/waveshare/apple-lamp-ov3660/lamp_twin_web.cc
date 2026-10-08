@@ -8,6 +8,10 @@
 #include <string>
 #include "lamp_twin_page.h"
 #include "lamp_twin_web.h"
+#if CONFIG_APPLE_LAMP_OMNI_REALTIME
+#include "lamp_omni_page.h"
+#include "omni_realtime_protocol.h"
+#endif
 namespace {
 httpd_handle_t server = nullptr;
 LampHardwareExecutor* device = nullptr;
@@ -30,6 +34,9 @@ esp_err_t Json(httpd_req_t* req, const std::string& data) {
 esp_err_t Page(httpd_req_t* req) {
     std::string page = kLampTwinPage;
     page.replace(page.find("__TOKEN__"), 9, secret);
+#if CONFIG_APPLE_LAMP_OMNI_REALTIME
+    page.insert(page.find("</main>"), kLampOmniPage);
+#endif
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
@@ -53,6 +60,10 @@ esp_err_t Api(httpd_req_t* req) {
     std::string path(req->uri);
     path = path.substr(0, path.find('?'));
     if (req->method == HTTP_GET) {
+#if CONFIG_APPLE_LAMP_OMNI_REALTIME
+        if (path == "/api/lamp/omni")
+            return Json(req, OmniPanel());
+#endif
         if (path == "/api/lamp/history") {
             char query[64]{}, value[24]{};
             uint64_t after = 0;
@@ -97,6 +108,10 @@ esp_err_t Api(httpd_req_t* req) {
             return Json(req, device->PanelConfig(body));
         if (path == "/api/lamp/command")
             return Json(req, device->PanelSubmit(body));
+#if CONFIG_APPLE_LAMP_OMNI_REALTIME
+        if (path == "/api/lamp/omni")
+            return Json(req, OmniPanel(body));
+#endif
     }
     httpd_resp_set_status(req, "404 Not Found");
     return Json(req, "{\"ok\":false,\"error\":{\"message\":\"Unknown API\"}}");
@@ -110,6 +125,9 @@ void StartLampTwinWeb(LampHardwareExecutor& executor) {
         snprintf(token + i * 8, 9, "%08lx", static_cast<unsigned long>(esp_random()));
     secret = token;
     device = &executor;
+#if CONFIG_APPLE_LAMP_OMNI_REALTIME
+    OmniSetStateReader([&executor] { return executor.State(); });
+#endif
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 8080;
     config.ctrl_port = 32769;

@@ -119,7 +119,9 @@ public:
         InitializeCamera();
 #if CONFIG_APPLE_LAMP_HARDWARE_MOTION
         lamp_executor_ = new LampHardwareExecutor();
-#if CONFIG_APPLE_LAMP_TWIN_WEB
+#if CONFIG_APPLE_LAMP_OMNI_REALTIME
+        ESP_LOGI(TAG, "Firmware role: OMNI-POC; direct cloud PCM, read-only cloud tools");
+#elif CONFIG_APPLE_LAMP_TWIN_WEB
         ESP_LOGI(TAG, "Firmware role: LOCAL-TWIN; local web test panel, no startup motion");
 #else
         ESP_LOGI(TAG, "Firmware role: LOCAL-HARDWARE; operator enable required, no startup motion");

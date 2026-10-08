@@ -146,6 +146,7 @@ public:
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
+    void SetSendPcm(bool enabled) { send_pcm_ = enabled; }
     void SetModelsList(srmodel_list_t* models_list);
 
 private:
@@ -205,6 +206,7 @@ private:
     bool device_aec_enabled_ = false;
 #endif
     std::atomic<bool> service_stopped_{true};
+    std::atomic<bool> send_pcm_{false};
     std::atomic<bool> audio_input_need_warmup_{false};
 
     esp_timer_handle_t audio_power_timer_ = nullptr;

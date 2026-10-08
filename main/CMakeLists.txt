@@ -44,6 +44,9 @@ set(SOURCES "audio/audio_codec.cc"
             )
 
 set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols")
+if(CONFIG_APPLE_LAMP_OMNI_REALTIME)
+    list(APPEND SOURCES "protocols/omni_realtime_protocol.cc")
+endif()
 
 # Add board common files
 list(APPEND SOURCES

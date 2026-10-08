@@ -1,0 +1,107 @@
+// Production event handler with fake RTOS/transport; no device, credential or cloud access.
+#include <atomic>
+#include <cassert>
+#include <chrono>
+#include <deque>
+#include <functional>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+#include "web_socket.h"
+#define private public
+#include "omni_realtime_protocol.h"
+#undef private
+#include "../../main/protocols/omni_realtime_protocol.cc"
+
+void Protocol::OnIncomingAudio(std::function<void(std::unique_ptr<AudioStreamPacket>)> f) {
+    on_incoming_audio_ = f;
+}
+void Protocol::OnIncomingJson(std::function<void(const cJSON*)> f) { on_incoming_json_ = f; }
+void Protocol::OnAudioChannelOpened(std::function<void()> f) { on_audio_channel_opened_ = f; }
+void Protocol::OnAudioChannelClosed(std::function<void()> f) { on_audio_channel_closed_ = f; }
+void Protocol::OnNetworkError(std::function<void(const std::string&)> f) { on_network_error_ = f; }
+void Protocol::OnConnected(std::function<void()> f) { on_connected_ = f; }
+void Protocol::OnDisconnected(std::function<void()> f) { on_disconnected_ = f; }
+void Protocol::SetError(const std::string& s) {
+    if (on_network_error_)
+        on_network_error_(s);
+}
+bool Protocol::IsTimeout() const { return false; }
+void Protocol::SendStartListening(ListeningMode) {}
+void Protocol::SendStopListening() {}
+void Protocol::SendAbortSpeaking(AbortReason) {}
+void Protocol::SendWakeWordDetected(const std::string&) {}
+void Protocol::SendMcpMessage(const std::string&) {}
+
+int main() {
+    auto config = Parse(OmniPanel(
+        R"({"op":"configure","workspace":"test-space","region":"cn-beijing","key":"dummy-secret"})"));
+    assert(cJSON_IsTrue(cJSON_GetObjectItem(config.get(), "configured")));
+    assert(OmniPanel().find("dummy-secret") == std::string::npos);
+    OmniRealtimeProtocol p;
+    p.socket_ = std::make_unique<WebSocket>();
+    unsigned opened = 0, audio = 0, starts = 0, stops = 0, errors = 0, reads = 0;
+    p.OnAudioChannelOpened([&] { opened++; });
+    p.OnNetworkError([&](const std::string&) { errors++; });
+    p.OnIncomingJson([&](const cJSON* j) {
+        if (Str(j, "state") == "start")
+            starts++;
+        if (Str(j, "state") == "stop")
+            stops++;
+    });
+    p.OnIncomingAudio([&](auto packet) {
+        assert(packet->pcm16);
+        assert(packet->sample_rate == 24000);
+        audio += packet->payload.size();
+    });
+    p.Receive(R"({"type":"session.created","session":{"id":"s1"}})");
+    assert(!p.ready_ && p.socket_->sent.size() == 1);
+    p.Receive(R"({"type":"session.updated"})");
+    p.Receive(R"({"type":"session.updated"})");
+    assert(p.ready_ && opened == 1);
+    p.Receive(R"({"type":"input_audio_buffer.committed"})");
+    assert(p.socket_->sent.back() == R"({"type":"response.create"})");
+    p.Receive(R"({"type":"response.created","response":{"id":"r1"}})");
+    p.Receive(R"({"type":"response.audio.delta","response_id":"old","delta":"AAAA"})");
+    assert(audio == 0);
+    p.Receive(R"({"type":"response.audio.delta","response_id":"r1","delta":"AAAAAA=="})");
+    assert(audio == 4 && starts == 1);
+    p.Receive(R"({"type":"response.done","response":{"id":"old","status":"completed"}})");
+    assert(stops == 0);
+    p.Receive(R"({"type":"response.done","response":{"id":"r1","status":"completed"}})");
+    assert(stops == 1);
+    OmniSetStateReader([&] {
+        reads++;
+        return R"({"mode":"sit","pose_rad":{"baseYaw":0},"irrelevant":"hidden"})";
+    });
+    p.Receive(R"({"type":"response.created","response":{"id":"r2"}})");
+    const auto call =
+        R"({"type":"response.function_call_arguments.done","response_id":"r2","name":"lamp_get_state","call_id":"call_1","arguments":"{}"})";
+    p.Receive(call);
+    p.Receive(call);
+    assert(reads == 1);
+    p.Receive(R"({"type":"response.done","response":{"id":"r2","status":"completed"}})");
+    assert(p.socket_->sent.back() == R"({"type":"response.create"})");
+    auto result = Parse(p.socket_->sent[p.socket_->sent.size() - 2]);
+    auto item = cJSON_GetObjectItem(result.get(), "item");
+    assert(Str(item, "call_id") == "call_1");
+    assert(Str(item, "output").find("irrelevant") == std::string::npos);
+    p.Receive(R"({"type":"response.created","response":{"id":"r3"}})");
+    auto id = p.playback_.load();
+    assert(p.AcceptsPlayback(id));
+    p.SendAbortSpeaking(kAbortReasonNone);
+    assert(!p.AcceptsPlayback(id));
+    p.Receive(R"({"type":"response.audio.delta","response_id":"r3","delta":"AAAAAA=="})");
+    p.Receive(R"({"type":"response.created","response":{"id":"late"}})");
+    assert(audio == 4 && p.playback_ == 0);
+    p.cancel_ = false;
+    p.Receive(R"({"type":"response.created","response":{"id":"r4"}})");
+    p.Receive(R"({"type":"response.audio.delta","response_id":"r4","delta":"@@"})");
+    assert(errors == 1 && !p.ready_ && p.close_);
+    auto info = OmniPanel();
+    assert(info.find("dummy-secret") == std::string::npos);
+    std::cout << "PASS handshake, PCM, stale response, function output/dedup, cancel and corrupt "
+                 "payload\n";
+}

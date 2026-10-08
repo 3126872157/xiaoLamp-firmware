@@ -14,6 +14,7 @@ struct AudioStreamPacket {
     uint32_t playback_id = 0;
     uint32_t media_position_ms = 0;
     std::vector<uint8_t> payload;
+    bool pcm16 = false;  // Optional raw signed little-endian PCM; default retains Opus.
 };
 
 struct BinaryProtocol2 {
@@ -57,6 +58,9 @@ public:
     void OnDisconnected(std::function<void()> callback);
 
     virtual bool Start() = 0;
+    virtual bool UsesPcmAudio() const { return false; }
+    virtual bool OpensAsynchronously() const { return false; }
+    virtual bool AcceptsPlayback(uint32_t) const { return true; }
     virtual bool OpenAudioChannel() = 0;
     virtual void CloseAudioChannel(bool send_goodbye = true) = 0;
     virtual bool IsAudioChannelOpened() const = 0;

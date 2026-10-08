@@ -1157,6 +1157,12 @@ endmenu
 
 menu "Apple Lamp execution backend"
     depends on BOARD_TYPE_APPLE_LAMP_OV3660
+    config APPLE_LAMP_OMNI_REALTIME
+        bool "Experimental Bailian Omni direct PCM protocol"
+        depends on APPLE_LAMP_TWIN_WEB
+        default n
+        help
+            Separate Omni PoC release; RAM credentials, no official XiaoZhi OTA/activation.
     config APPLE_LAMP_LOCAL_EXECUTOR
         bool "Local hardware executor"
         default n

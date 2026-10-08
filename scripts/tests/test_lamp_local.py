@@ -55,8 +55,9 @@ class LocalBusTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
         for role, (name, marker) in module.ROLES.items():
             sdk = "CONFIG_APPLE_LAMP_LOCAL_EXECUTOR=y\nCONFIG_APPLE_LAMP_UART_PROBE=y\nCONFIG_COMPILER_CXX_EXCEPTIONS=y" if role != "simulator" else ""
-            if role in ("local-hardware", "local-twin"): sdk += "\nCONFIG_APPLE_LAMP_HARDWARE_MOTION=y"
-            if role == "local-twin": sdk += "\nCONFIG_APPLE_LAMP_TWIN_WEB=y"
+            if role in ("local-hardware", "local-twin", "omni-poc"): sdk += "\nCONFIG_APPLE_LAMP_HARDWARE_MOTION=y"
+            if role in ("local-twin", "omni-poc"): sdk += "\nCONFIG_APPLE_LAMP_TWIN_WEB=y"
+            if role == "omni-poc": sdk += "\nCONFIG_APPLE_LAMP_OMNI_REALTIME=y"
             image = name.encode() + b"\0" + marker
             module.validate_role(image, role, sdk)
             for other in module.ROLES:

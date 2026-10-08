@@ -1,5 +1,11 @@
 # Apple Lamp OV3660：第一轮无屏适配
 
+2026-10-08 新增实验构建 `apple-lamp-ov3660-omni-poc`（`--role omni-poc`）。
+ESP直连百炼3.8 Realtime，PCM语音／取消／只读工具；凭证在8080网页配置，RAM保存。
+不需要官方小智绑定；不改板级引脚或原0.1标签。当前未烧录／云端实测。
+完整开通、构建、测试步骤见父项目 `docs/04_omni_realtime_poc.md`，
+固件协议位于 `main/protocols/omni_realtime_protocol.*`。原文以下保留硬件基线。
+
 本地执行器功能分支已增加独立只读构建角色，模拟器角色仍保留。
 当前阶段与构建/产物区别见[本地执行器说明](../../../../docs/apple-lamp-local-executor.md)；只读版尚未烧录，不代表实机动作已支持。
 

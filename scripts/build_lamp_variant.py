@@ -10,6 +10,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 ROLES = {
+    "omni-poc": ("apple-lamp-ov3660-omni-poc", b"Firmware role: OMNI-POC"),
     "simulator": ("apple-lamp-ov3660", b"Firmware role: SIMULATOR-BRIDGE"),
     "local-readonly": ("apple-lamp-ov3660-local-readonly", b"Firmware role: LOCAL-READONLY"),
     "local-hardware": ("apple-lamp-ov3660-local-hardware", b"Firmware role: LOCAL-HARDWARE"),
@@ -24,13 +25,15 @@ def validate_role(image: bytes, role: str, sdk: str):
     for other, (_, other_marker) in ROLES.items():
         if other != role and other_marker in image:
             raise ValueError("Binary contains the opposite application role")
+    if ("CONFIG_APPLE_LAMP_OMNI_REALTIME=y" in sdk.splitlines()) != (role == "omni-poc"):
+        raise ValueError("Omni protocol configuration does not match role")
     expected_local = role != "simulator"
     for symbol in ("APPLE_LAMP_LOCAL_EXECUTOR", "APPLE_LAMP_UART_PROBE", "COMPILER_CXX_EXCEPTIONS"):
         if (f"CONFIG_{symbol}=y" in sdk.splitlines()) != expected_local:
             raise ValueError(f"Active configuration does not match role: {symbol}")
-    if ("CONFIG_APPLE_LAMP_HARDWARE_MOTION=y" in sdk.splitlines()) != (role in ("local-hardware", "local-twin")):
+    if ("CONFIG_APPLE_LAMP_HARDWARE_MOTION=y" in sdk.splitlines()) != (role in ("local-hardware", "local-twin", "omni-poc")):
         raise ValueError("Hardware motion configuration does not match role")
-    if ("CONFIG_APPLE_LAMP_TWIN_WEB=y" in sdk.splitlines()) != (role == "local-twin"):
+    if ("CONFIG_APPLE_LAMP_TWIN_WEB=y" in sdk.splitlines()) != (role in ("local-twin", "omni-poc")):
         raise ValueError("Web test panel configuration does not match role")
 
 
@@ -56,10 +59,12 @@ def archive(role: str):
         files.append({"address": address, "file": relative, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()})
     manifest = {"role": role, "board_name": ROLES[role][0], "git_commit": commit,
                 "worktree_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
-                "app_sha256": digest, "motion_enabled": role in ("local-hardware", "local-twin"),
+                "app_sha256": digest, "motion_enabled": role in ("local-hardware", "local-twin", "omni-poc"),
                 "startup_armed": False,
                 "uart_probe_enabled": role != "simulator", "flash_files": files,
                 "write_flash_args": args["write_flash_args"], "contains_local_configuration": True}
+    if role == "omni-poc":
+        manifest["cloud_motion_enabled"] = False
     manifest_path = output / "manifest.json"
     if manifest_path.exists() and json.loads(manifest_path.read_text(encoding="utf-8")) != manifest:
         raise ValueError("An immutable build record already exists with different metadata")
@@ -108,7 +113,7 @@ def main():
         subprocess.run([sys.executable, "scripts/build.py", "waveshare/apple-lamp-ov3660", "--name",
                         ROLES[args.role][0], "--language", "zh-CN"], cwd=ROOT, env=env, check=True)
     manifest = archive(args.role)
-    print(f"ROLE={args.role}; manifest={manifest}; hardware motion capability={args.role in ('local-hardware', 'local-twin')}; startup disarmed", flush=True)
+    print(f"ROLE={args.role}; manifest={manifest}; hardware motion capability={args.role in ('local-hardware', 'local-twin', 'omni-poc')}; startup disarmed", flush=True)
     if args.flash:
         flash(manifest, args.role, args.port)
 
