@@ -5,11 +5,12 @@
 
 struct Executor : LampActionExecutor {
     unsigned counter = 0, groups = 0, stops = 0;
-    bool armed = false, manual = false, completed = false;
+    bool armed = false, manual = false, completed = false, failed = false, online = false;
     std::string NewRequestId() override { return "test-" + std::to_string(++counter); }
     bool Ready() override { return true; }
     std::string State() override {
-        return "{\"mode\":\"stand\",\"busy\":false,\"motion_enabled\":" +
+        return "{\"available\":" + std::string(online ? "true" : "false") +
+               ",\"mode\":\"stand\",\"busy\":false,\"motion_enabled\":" +
                std::string(armed ? "true" : "false") + "}";
     }
     std::string Inspect(const std::string&) override { return "{}"; }
@@ -20,7 +21,10 @@ struct Executor : LampActionExecutor {
         const auto op = lamp::Text(j.get(), "operation"), id = lamp::Text(j.get(), "request_id");
         if (op == "get_task")
             return "{\"ok\":true,\"result\":{\"task_id\":\"task\",\"status\":\"" +
-                   std::string(completed ? "completed" : "running") + "\"}}";
+                   std::string(failed      ? "failed"
+                               : completed ? "completed"
+                                           : "running") +
+                   "\",\"total_steps\":1,\"reason\":\"test feedback\"}}";
         if (op == "cancel") {
             stops++;
             return "{\"ok\":true}";
@@ -38,6 +42,12 @@ int main() {
     Executor executor;
     LampEdgeRuntime runtime(executor);
     runtime.Tick();
+    auto offline = runtime.Submit("lamp_get_state", "{}", 1);
+    runtime.Tick();
+    const auto state = offline.get();
+    assert(state.find("\"available\":false") != std::string::npos);
+    assert(state.find("\"confirmed_mode\":\"unknown\"") != std::string::npos);
+    assert(state.find("runtime_ready") != std::string::npos);
     const std::string group =
         R"({"steps":[{"action_id":"adjust_pose","direction":"yaw_positive","size":"small"}]})";
     auto disabled = runtime.Submit("lamp_run_sequence", group, 1);
@@ -58,7 +68,7 @@ int main() {
     executor.armed = true;
     auto move = runtime.Submit("lamp_run_sequence", group, 3);
     runtime.Tick();
-    assert(move.get().find("accepted") != std::string::npos && executor.groups == 1);
+    assert(move.get().find("Not confirmed complete") != std::string::npos && executor.groups == 1);
     auto twice = runtime.Submit("lamp_run_sequence", group, 3);
     runtime.Tick();
     assert(twice.get().find("one motion") != std::string::npos && executor.groups == 1);
@@ -78,6 +88,22 @@ int main() {
     executor.completed = true;
     runtime.Tick();
     assert(torque.get().find("completed") != std::string::npos);
+    executor.failed = true;
+    auto failure = runtime.Submit("lamp_run_sequence",
+                                  R"({"steps":[{"action_id":"set_mode","mode":"stand"}]})", 7);
+    runtime.Tick();
+    const auto rejected = failure.get();
+    assert(rejected.find("\"ok\":false") != std::string::npos);
+    assert(rejected.find("\"execution_completed\":false") != std::string::npos);
+    executor.failed = false;
+    auto stand = runtime.Submit("lamp_run_sequence",
+                                R"({"steps":[{"action_id":"set_mode","mode":"stand"}]})", 8);
+    executor.completed = false;
+    runtime.Tick();
+    assert(stand.wait_for(std::chrono::seconds(0)) != std::future_status::ready);
+    executor.completed = true;
+    runtime.Tick();
+    assert(stand.get().find("\"execution_completed\":true") != std::string::npos);
     std::vector<std::future<std::string>> full;
     for (int i = 0; i < 64; i++)
         full.push_back(runtime.Submit("lamp_get_state", "{}", 7));

@@ -191,6 +191,33 @@ int main() {
     assert(dispatched == 1);
     async.SendAbortSpeaking(kAbortReasonNone);
     assert(invalidated > 0);
+    // Enabling and standing in one response must not race the asynchronous torque confirmation.
+    std::promise<std::string> enabled;
+    std::vector<std::string> order;
+    OmniSetRuntime(
+        [&](const std::string& name, const std::string&, uint64_t) {
+            order.push_back(name);
+            if (name == "lamp_set_torque")
+                return enabled.get_future();
+            std::promise<std::string> done;
+            auto future = done.get_future();
+            done.set_value(R"({"ok":true,"execution_completed":true})");
+            return future;
+        },
+        [](uint64_t) {}, "[]");
+    OmniRealtimeProtocol batch;
+    batch.socket_ = std::make_unique<WebSocket>();
+    batch.ready_ = true;
+    batch.Receive(R"({"type":"response.created","response":{"id":"batch"}})");
+    batch.Receive(
+        R"({"type":"response.function_call_arguments.done","response_id":"batch","name":"lamp_set_torque","call_id":"enable","arguments":"{\"enabled\":true}"})");
+    batch.Receive(
+        R"({"type":"response.function_call_arguments.done","response_id":"batch","name":"lamp_run_sequence","call_id":"stand","arguments":"{\"steps\":[{\"action_id\":\"set_mode\",\"mode\":\"stand\"}]}"})");
+    batch.Receive(R"({"type":"response.done","response":{"id":"batch","status":"completed"}})");
+    assert(order.size() == 1 && order[0] == "lamp_set_torque" && batch.awaiting_tools_);
+    enabled.set_value(R"({"ok":true,"execution_completed":true})");
+    batch.CompleteTools();
+    assert(order.size() == 2 && order[1] == "lamp_run_sequence" && !batch.awaiting_tools_);
     OmniSetRuntime({}, {}, "");
     auto info = OmniPanel();
     assert(info.find("dummy-secret") == std::string::npos);

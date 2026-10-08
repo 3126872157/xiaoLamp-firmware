@@ -20,6 +20,25 @@ const cJSON* Result(const cJSON* j) {
     auto* result = cJSON_GetObjectItemCaseSensitive(j, "result");
     return result ? result : j;
 }
+std::string ToolResult(const std::string& output) {
+    auto j = Parse(output);
+    if (!cJSON_IsObject(j.get()))
+        return Error("Invalid executor result");
+    const auto status = lamp::Text(Result(j.get()), "status");
+    const bool failed = status == "failed" || status == "cancelled";
+    if (failed) {
+        cJSON_ReplaceItemInObject(j.get(), "ok", cJSON_CreateBool(false));
+        cJSON_AddStringToObject(j.get(), "error", lamp::Text(Result(j.get()), "reason").c_str());
+    }
+    cJSON_AddBoolToObject(j.get(), "execution_completed", status == "completed");
+    cJSON_AddStringToObject(j.get(), "instruction",
+                            failed ? "Report failure and reason. No movement success."
+                            : status == "completed"
+                                ? "Hardware confirmed completion."
+                                : "Not confirmed complete. Say starting/accepted only; use "
+                                  "lamp_get_task before claiming completion.");
+    return lamp::Encode(j.get());
+}
 bool Emergency(const std::string& name, const std::string& args) {
     auto j = Parse(args);
     return name == "lamp_stop" ||
@@ -119,9 +138,10 @@ void LampEdgeRuntime::Process(Work* work) {
         auto full = Parse(State());
         Json compact(cJSON_CreateObject(), cJSON_Delete);
         for (auto key :
-             {"mode", "busy", "motion_enabled", "manual_control", "pose_rad", "target_pose_rad",
-              "requires_operator_enable", "torque_enabled_confirmed", "unloaded_confirmed",
-              "calibrated_targets", "unsupported_primitives", "last_task", "runtime"}) {
+             {"available", "configuration_loaded", "mode", "busy", "motion_enabled",
+              "manual_control", "pose_rad", "target_pose_rad", "requires_operator_enable",
+              "torque_enabled_confirmed", "unloaded_confirmed", "calibrated_targets",
+              "unsupported_primitives", "last_task", "runtime"}) {
             auto* value = cJSON_GetObjectItemCaseSensitive(full.get(), key);
             if (value)
                 cJSON_AddItemToObject(compact.get(), key, cJSON_Duplicate(value, true));
@@ -153,11 +173,14 @@ void LampEdgeRuntime::Process(Work* work) {
         motion_turn_ = work->turn;
     }
     if (accepted && pending_.size() < 8 &&
-        (operation == "set_torque" || operation == "rest" || operation == "record_calibration")) {
+        (operation == "execute_group" || operation == "set_torque" || operation == "rest" ||
+         operation == "record_calibration")) {
         pending_.push_back(
-            {work, task, esp_timer_get_time() + (operation == "rest" ? 65000000 : 15000000)});
+            {work, task,
+             esp_timer_get_time() +
+                 ((operation == "rest" || operation == "execute_group") ? 65000000 : 15000000)});
     } else
-        Complete(work, output);
+        Complete(work, ToolResult(output));
     CancelOwned();
 }
 void LampEdgeRuntime::Tick() {
@@ -178,15 +201,24 @@ void LampEdgeRuntime::Tick() {
         auto output = executor_.Submit(lamp::Query("get_task", executor_.NewRequestId(), it->task));
         auto result = Parse(output);
         const auto status = lamp::Text(Result(result.get()), "status");
-        if (cancelled || timeout ||
+        bool mode_only = false;
+        auto arguments = Parse(it->work->args);
+        auto* steps = cJSON_GetObjectItemCaseSensitive(arguments.get(), "steps");
+        mode_only = cJSON_GetArraySize(steps) == 1 &&
+                    lamp::Text(cJSON_GetArrayItem(steps, 0), "action_id") == "set_mode";
+        auto* total = cJSON_GetObjectItemCaseSensitive(Result(result.get()), "total_steps");
+        const bool started = it->work->name == "lamp_run_sequence" && !mode_only &&
+                             status == "running" && cJSON_IsNumber(total) && total->valuedouble > 0;
+        if (cancelled || timeout || started ||
             !cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(result.get(), "ok")) ||
-            status == "completed" || status == "failed" || status == "cancelled") {
+            status == "completed" || status == "limited" || status == "failed" ||
+            status == "cancelled") {
             if (timeout)
                 executor_.Submit(lamp::Query("cancel", executor_.NewRequestId(), it->task));
             Complete(it->work,
                      cancelled ? Error("Turn cancelled")
                      : timeout ? Error("Control confirmation timed out; inspect hardware feedback")
-                               : output);
+                               : ToolResult(output));
             it = pending_.erase(it);
         } else
             ++it;
@@ -212,10 +244,14 @@ std::string LampEdgeRuntime::State() {
     auto* runtime = cJSON_AddObjectToObject(j.get(), "runtime");
     cJSON_AddStringToObject(runtime, "stage", "semantic_tools");
     cJSON_AddStringToObject(runtime, "requested_mode", requested_mode.c_str());
-    cJSON_AddStringToObject(runtime, "confirmed_mode", lamp::Text(j.get(), "mode").c_str());
+    // Persisted mode is a planning reference, never evidence of physical posture.
+    cJSON_AddStringToObject(runtime, "mode_basis", "saved_action_reference_not_measured_posture");
+    cJSON_AddStringToObject(runtime, "confirmed_mode", "unknown");
+    cJSON_AddBoolToObject(runtime, "hardware_online",
+                          cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(j.get(), "available")));
     cJSON_AddNumberToObject(runtime, "snapshot_age_ms",
                             snapshot_at ? (esp_timer_get_time() - snapshot_at) / 1000 : -1);
-    cJSON_AddBoolToObject(runtime, "available", started_);
+    cJSON_AddBoolToObject(runtime, "runtime_ready", started_);
     cJSON_AddBoolToObject(runtime, "vision_enabled", false);
     cJSON_AddBoolToObject(runtime, "companion_enabled", false);
     cJSON_AddBoolToObject(runtime, "speech_motion_sync", false);
@@ -242,7 +278,9 @@ std::string LampEdgeRuntime::Tools() {
         cJSON_AddObjectToObject(s, "properties");
         return s;
     };
-    add("lamp_get_state", "查询缓存状态，不反复轮询；accepted不代表完成。", object());
+    add("lamp_get_state",
+        "查询机械臂缓存：available才表示五轴反馈新鲜；mode仅保存的动作参考，不能断言已经站起。",
+        object());
     add("lamp_end_conversation",
         "广义告别或停止聊天：简短告别播完退出监听，不坐下卸力。讨论告别不结束。", object());
     add("lamp_rest", "明确让台灯休息：坐下，真实确认后卸力；成功后简短告别并结束对话。", object());

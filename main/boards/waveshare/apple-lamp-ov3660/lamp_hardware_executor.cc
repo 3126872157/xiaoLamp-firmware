@@ -639,7 +639,12 @@ bool LampHardwareExecutor::Positions(lamp::pose::Pose& q) {
     for (unsigned i = 0; i < 5; i++) {
         const auto& joint = lamp::pose::kJoints[i];
         if (q[i] < joint.lower - tolerance || q[i] > joint.upper + tolerance) {
-            io_error_ = "ID " + std::to_string(i + 1) + " 当前角度超出 URDF 限位，请校准安装偏置";
+            io_error_ =
+                "ID " + std::to_string(i + 1) +
+                " 当前角度超出 URDF 限位，请校准安装偏置；actual_rad=" + std::to_string(q[i]) +
+                ", lower_rad=" + std::to_string(joint.lower) +
+                ", upper_rad=" + std::to_string(joint.upper) +
+                ", feedback_tolerance_rad=" + std::to_string(tolerance);
             return false;
         }
         q[i] = std::clamp(q[i], joint.lower, joint.upper);
