@@ -24,6 +24,8 @@ public:
         return running_ && ready_ && id && id == playback_;
     }
     void ReportPlaybackFailure(const std::string& message) override { Fail(message.c_str()); }
+    bool WantsConversationEnd() const override { return rest_requested_; }
+    void OnPlaybackDrained() override;
     bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) override;
     void SendStartListening(ListeningMode mode) override;
     void SendStopListening() override;
@@ -48,6 +50,7 @@ private:
     std::atomic<bool> ready_{false}, running_{true}, open_{false}, close_{false}, cancel_{false};
     std::atomic<bool> disconnected_{false}, overloaded_{false}, recording_{false};
     std::atomic<AbortReason> abort_reason_{kAbortReasonNone};
+    std::atomic<bool> rest_requested_{false}, rest_reply_done_{false};
     std::atomic<uint32_t> epoch_{1}, playback_{0};
     bool speaking_ = false, had_audio_ = false;
     bool manual_ = true;

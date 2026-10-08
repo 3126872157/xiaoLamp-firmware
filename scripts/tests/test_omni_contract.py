@@ -34,7 +34,13 @@ class OmniContractTests(unittest.TestCase):
         self.assertEqual(s['audio']['input']['format'], dict(type='pcm',sample_rate=16000,
             sample_format='s16le',channels=1,packing='interleaved',channel_layout='mono'))
         self.assertEqual(s['audio']['output']['format'], dict(type='pcm',sample_rate=24000))
-        self.assertEqual([t['function']['name'] for t in s['tools']], ['lamp_get_state'])
+        self.assertEqual([t['function']['name'] for t in s['tools']],
+                         ['lamp_get_state', 'lamp_end_conversation'])
+
+    def test_rest_accepts_only_empty_object(self):
+        self.assertTrue(self.check('tool',dict(name='lamp_end_conversation',arguments='{}')))
+        for args in ('null','[]','{"torque":false}','{"in_use":false}','{} trailing'):
+            self.assertFalse(self.check('tool',dict(name='lamp_end_conversation',arguments=args)))
 
     def test_allowed_regions(self):
         for region in ('cn-beijing', 'ap-southeast-1'):

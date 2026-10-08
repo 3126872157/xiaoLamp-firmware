@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
     };
     bool valid = argc == 2 && std::string(argv[1]) == "credentials"
                      ? omni::Credentials(str("workspace"), str("key"), str("region"))
-                     : omni::StateArguments(str("name"), str("arguments"));
+                     : omni::ToolArguments(str("name"), str("arguments"));
     cJSON_Delete(j);
     std::cout << (valid ? "true" : "false");
 }

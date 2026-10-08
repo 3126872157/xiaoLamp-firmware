@@ -115,6 +115,38 @@ int main() {
     auto item = cJSON_GetObjectItem(result.get(), "item");
     assert(Str(item, "call_id") == "call_1");
     assert(Str(item, "output").find("irrelevant") == std::string::npos);
+    // Model-requested rest waits for the follow-up goodbye AND physical playback drain.
+    // Test both audible and text-only replies (no drain event in the latter case).
+    for (bool audible : {false, true}) {
+        OmniRealtimeProtocol rest;
+        rest.socket_ = std::make_unique<WebSocket>();
+        rest.ready_ = true;
+        in_use = true;
+        rest.Receive(R"({"type":"response.created","response":{"id":"rest1"}})");
+        const auto request =
+            R"({"type":"response.function_call_arguments.done","response_id":"rest1","name":"lamp_end_conversation","call_id":"rest_call","arguments":"{}"})";
+        rest.Receive(request);
+        rest.Receive(request);
+        assert(rest.WantsConversationEnd() && !rest.close_);
+        rest.OnPlaybackDrained();
+        assert(!rest.close_);  // Cannot close before the farewell response.
+        rest.Receive(R"({"type":"response.done","response":{"id":"rest1","status":"completed"}})");
+        assert(rest.socket_->sent.back() == R"({"type":"response.create"})");
+        rest.Receive(R"({"type":"response.created","response":{"id":"goodbye"}})");
+        if (audible)
+            rest.Receive(
+                R"({"type":"response.audio.delta","response_id":"goodbye","delta":"AAAAAA=="})");
+        rest.Receive(R"({"type":"response.done","response":{"id":"old","status":"completed"}})");
+        rest.OnPlaybackDrained();
+        assert(!rest.close_);
+        rest.Receive(
+            R"({"type":"response.done","response":{"id":"goodbye","status":"completed"}})");
+        assert(!rest.close_ && in_use);
+        rest.OnPlaybackDrained();  // Application calls immediately if playback is already idle.
+        assert(rest.close_ && !rest.ready_ && !rest.cancel_);
+        rest.Disconnect();
+        assert(!in_use && status == "resting" && !rest.WantsConversationEnd());
+    }
     p.Receive(R"({"type":"response.created","response":{"id":"r3"}})");
     auto id = p.playback_.load();
     assert(p.AcceptsPlayback(id));

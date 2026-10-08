@@ -202,11 +202,18 @@ void OmniRealtimeProtocol::CloseAudioChannel(bool) {
     ++epoch_;
     close_ = true;
 }
+void OmniRealtimeProtocol::OnPlaybackDrained() {
+    if (rest_requested_ && rest_reply_done_.exchange(false)) {
+        Status("resting", "", "model_end_conversation");
+        Board::GetInstance().RecordDiagnostic("voice_rest", "omni", "model_end_conversation");
+        CloseAudioChannel();
+    }
+}
 bool OmniRealtimeProtocol::SendText(const std::string& s) {
     return Enqueue(new Work{s, false, false, epoch_});
 }
 bool OmniRealtimeProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> p) {
-    if (!ready_ || !recording_)
+    if (!ready_ || !recording_ || rest_requested_)
         return true;
     if (!p->pcm16 || p->sample_rate != 16000 || p->payload.empty() || p->payload.size() > 8192)
         return false;
@@ -302,6 +309,8 @@ void OmniRealtimeProtocol::Disconnect(bool notify) {
     last_call_.clear();
     speaking_ = false;
     had_audio_ = false;
+    rest_requested_ = false;
+    rest_reply_done_ = false;
     connecting_since_ = 0;
     recording_since_ = 0;
     session_since_ = 0;
@@ -313,7 +322,7 @@ void OmniRealtimeProtocol::Disconnect(bool notify) {
         on_disconnected_();
     if (notify) {
         std::lock_guard lock(config_mutex);
-        if (status != "failed" && status != "cancelled")
+        if (status != "failed" && status != "cancelled" && status != "resting")
             status = "disconnected";
     }
 }
@@ -418,8 +427,15 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
         }
         last_call_ = call;
         tool_call_ = call;
-        if (!omni::StateArguments(Str(j.get(), "name"), Str(j.get(), "arguments"))) {
-            tool_output_ = R"({"ok":false,"error":"Only lamp_get_state({}) is allowed"})";
+        if (!omni::ToolArguments(Str(j.get(), "name"), Str(j.get(), "arguments"))) {
+            tool_output_ =
+                R"({"ok":false,"error":"Only lamp_get_state({}) and lamp_end_conversation({}) are allowed"})";
+        } else if (Str(j.get(), "name") == "lamp_end_conversation") {
+            rest_requested_ = true;
+            recording_ = false;
+            tool_output_ =
+                R"({"ok":true,"status":"rest_pending","instruction":"Say one short goodbye; the local runtime will close after playback drains. No servo movement or torque change."})";
+            Board::GetInstance().RecordDiagnostic("tool", "lamp_end_conversation", tool_output_);
         } else {
             std::function<std::string()> reader;
             {
@@ -463,10 +479,11 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
             tool_call_.clear();
             tool_output_.clear();
         } else {
-            if (speaking_ && playback_)
+            Status(rest_requested_ ? "rest_pending" : "ready");
+            rest_reply_done_ = rest_requested_.load();
+            if ((speaking_ || rest_requested_) && playback_)
                 Emit("stop");
             speaking_ = false;
-            Status("ready");
         }
         response_.clear();
     }
@@ -530,6 +547,8 @@ void OmniRealtimeProtocol::Run() {
             if (Write("{\"type\":\"input_audio_buffer.append\",\"audio\":\"" + encoded + "\"}"))
                 had_audio_ = true;
         } else if (w->text == "@manual" || w->text == "@vad") {
+            if (rest_requested_)
+                continue;
             manual_ = w->text == "@manual";
             // Audio format is immutable after first append; change only turn detection.
             Write(

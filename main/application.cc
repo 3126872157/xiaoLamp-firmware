@@ -218,6 +218,8 @@ void Application::Run() {
         if (bits & MAIN_EVENT_PLAYBACK_DRAINED) {
             if (audio_service_.IsPlaybackIdle()) {
                 notify_player_.OnPlaybackDrained();
+                if (protocol_)
+                    protocol_->OnPlaybackDrained();
                 if (protocol_ && protocol_->UsesPcmAudio() && GetDeviceState() == kDeviceStateIdle)
                     audio_service_.EnableWakeWordDetection(true);
             }
@@ -680,7 +682,12 @@ void Application::InitializeProtocol() {
                 Schedule([this, playback_id]() {
                     if (!protocol_ || !protocol_->AcceptsPlayback(playback_id))
                         return;
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
+                    if (protocol_->WantsConversationEnd()) {
+                        pending_listening_start_ = false;
+                        SetDeviceState(kDeviceStateIdle);
+                        if (audio_service_.IsPlaybackIdle())
+                            protocol_->OnPlaybackDrained();
+                    } else if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
                         } else {
