@@ -61,6 +61,7 @@ public:
     virtual bool UsesPcmAudio() const { return false; }
     virtual bool OpensAsynchronously() const { return false; }
     virtual bool AcceptsPlayback(uint32_t) const { return true; }
+    virtual void ReportPlaybackFailure(const std::string&) { CloseAudioChannel(); }
     virtual bool OpenAudioChannel() = 0;
     virtual void CloseAudioChannel(bool send_goodbye = true) = 0;
     virtual bool IsAudioChannelOpened() const = 0;

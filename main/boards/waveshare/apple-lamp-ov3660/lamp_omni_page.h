@@ -2,11 +2,11 @@
 inline constexpr const char* kLampOmniPage = R"omnipage(
 <details open style="grid-column:1/-1"><summary>Omni Realtime · 实验版</summary>
 <p>ESP 直接连接百炼，不经过电脑。第一轮先用“开始录音 → 结束并回复”；VAD 模式自动判断说完。取消会断开本次会话。云端仅能查询台灯状态，暂不能运动。</p>
-<p class="notice">凭证仅在本次开机的 RAM 中保存。配置页使用局域网 HTTP，请只在可信网络使用专用测试 Key，不要在共享网络填写生产凭证。刷新不清除；重启清除。</p>
+<p class="notice">开发版将凭证保存到设备 NVS，重启后恢复；点击清除 Key 可删除。配置页使用局域网 HTTP，请在可信网络使用专用测试 Key。网页状态和日志不回显 Key。</p>
 <label>业务空间 Workspace ID <input id="omni-workspace" maxlength="128" autocomplete="off"></label>
 <label>地域 <select id="omni-region"><option value="cn-beijing">北京</option><option value="ap-southeast-1">新加坡</option></select></label>
 <label>百炼 API Key <input id="omni-key" type="password" maxlength="512" autocomplete="new-password"></label>
-<div class="buttons"><button data-omni="configure">保存本次开机配置</button><button data-omni="start">开始录音</button><button data-omni="finish">结束并回复</button><button data-omni="vad">开始 VAD 对话</button><button data-omni="cancel">取消本轮</button><button data-omni="close">断开会话</button><button data-omni="clear">清除 Key</button></div>
+<div class="buttons"><button data-omni="configure">保存设备配置</button><button data-omni="start">开始录音</button><button data-omni="finish">结束并回复</button><button data-omni="vad">开始 VAD 对话</button><button data-omni="cancel">取消本轮</button><button data-omni="close">断开会话</button><button data-omni="clear">清除 Key</button></div>
 <pre id="omni-status">尚未配置</pre></details>
 <script>
 window.addEventListener('DOMContentLoaded',()=>{

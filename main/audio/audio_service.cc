@@ -628,15 +628,22 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
     }
 }
 
-bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait) {
+bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait,
+                                           unsigned timeout_ms) {
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
     const uint32_t generation = playback_generation_;
     if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
         if (wait) {
-            audio_queue_cv_.wait(lock, [this, generation]() {
+            auto available = [this, generation]() {
                 return service_stopped_.load() || generation != playback_generation_ ||
                        audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE;
-            });
+            };
+            if (timeout_ms) {
+                if (!audio_queue_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                                              available))
+                    return false;
+            } else
+                audio_queue_cv_.wait(lock, available);
         } else {
             return false;
         }

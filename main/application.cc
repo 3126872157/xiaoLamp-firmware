@@ -218,6 +218,8 @@ void Application::Run() {
         if (bits & MAIN_EVENT_PLAYBACK_DRAINED) {
             if (audio_service_.IsPlaybackIdle()) {
                 notify_player_.OnPlaybackDrained();
+                if (protocol_ && protocol_->UsesPcmAudio() && GetDeviceState() == kDeviceStateIdle)
+                    audio_service_.EnableWakeWordDetection(true);
             }
             // Deferred listening start (auto mode): the playback queue has
             // drained, so it is now safe to enable voice processing.
@@ -561,29 +563,29 @@ void Application::InitializeProtocol() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
 
-    protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (packet->pcm16) {
-            if (pending_pcm_packets_.fetch_add(1) >= 32) {
-                --pending_pcm_packets_;
-                CloseConversation(true);
+    protocol_->OnIncomingAudio(
+        [this, source = protocol_.get()](std::unique_ptr<AudioStreamPacket> packet) {
+            if (packet->pcm16) {
+                // Omni invokes this on its worker, never on the application/audio tasks.
+                // Wait for the scheduled TTS start, then pace cloud bursts to speaker consumption.
+                const auto id = packet->playback_id;
+                const int64_t deadline = esp_timer_get_time() + 2000000;
+                while (source->AcceptsPlayback(id) && GetDeviceState() != kDeviceStateSpeaking &&
+                       esp_timer_get_time() < deadline)
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                if (!source->AcceptsPlayback(id))
+                    return;
+                if (GetDeviceState() != kDeviceStateSpeaking ||
+                    !audio_service_.PushPacketToDecodeQueue(std::move(packet), true, 2000)) {
+                    if (source->AcceptsPlayback(id))
+                        source->ReportPlaybackFailure("PCM playback stalled; check audio output");
+                }
                 return;
             }
-            auto shared = std::shared_ptr<AudioStreamPacket>(std::move(packet));
-            Schedule([this, shared] {
-                --pending_pcm_packets_;
-                if (protocol_ && protocol_->AcceptsPlayback(shared->playback_id) &&
-                    GetDeviceState() == kDeviceStateSpeaking) {
-                    if (!audio_service_.PushPacketToDecodeQueue(
-                            std::make_unique<AudioStreamPacket>(std::move(*shared))))
-                        CloseConversation(true);
-                }
-            });
-            return;
-        }
-        if (GetDeviceState() == kDeviceStateSpeaking) {
-            audio_service_.PushPacketToDecodeQueue(std::move(packet));
-        }
-    });
+            if (GetDeviceState() == kDeviceStateSpeaking) {
+                audio_service_.PushPacketToDecodeQueue(std::move(packet));
+            }
+        });
 
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
         if (protocol_->OpensAsynchronously()) {
@@ -963,6 +965,12 @@ void Application::HandleWakeWordDetectedEvent() {
 
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
+    if (protocol_->UsesPcmAudio() &&
+        (state != kDeviceStateIdle || !audio_service_.IsPlaybackIdle())) {
+        // Half-duplex: speaker echo is not a user-authorized interruption.
+        audio_service_.EnableWakeWordDetection(false);
+        return;
+    }
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
 
     if (state == kDeviceStateIdle) {
@@ -1086,7 +1094,8 @@ void Application::HandleStateChangedEvent() {
                     "neutral");  // Then set emotion (wechat mode checks child count)
             }
             audio_service_.EnableVoiceProcessing(false);
-            audio_service_.EnableWakeWordDetection(true);
+            audio_service_.EnableWakeWordDetection(!protocol_ || !protocol_->UsesPcmAudio() ||
+                                                   audio_service_.IsPlaybackIdle());
             break;
         case kDeviceStateConnecting:
             display->SetStatus(Lang::Strings::CONNECTING);
@@ -1118,7 +1127,8 @@ void Application::HandleStateChangedEvent() {
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
                 // Only AFE wake word can be detected in speaking mode
-                audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+                audio_service_.EnableWakeWordDetection((!protocol_ || !protocol_->UsesPcmAudio()) &&
+                                                       audio_service_.IsAfeWakeWord());
             }
             if (!protocol_ || !protocol_->UsesPcmAudio())
                 audio_service_.ResetDecoder();
@@ -1159,6 +1169,10 @@ void Application::StartListeningAudio() {
 }
 
 void Application::ConfigureWakeWordForListening() {
+    if (protocol_ && protocol_->UsesPcmAudio()) {
+        audio_service_.EnableWakeWordDetection(false);
+        return;
+    }
 #ifdef CONFIG_WAKE_WORD_DETECTION_IN_LISTENING
     // Enable wake word detection in listening mode (configured via Kconfig)
     audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());

@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 #include "web_socket.h"
 #define private public
@@ -40,7 +41,33 @@ int main() {
         R"({"op":"configure","workspace":"test-space","region":"cn-beijing","key":"dummy-secret"})"));
     assert(cJSON_IsTrue(cJSON_GetObjectItem(config.get(), "configured")));
     assert(OmniPanel().find("dummy-secret") == std::string::npos);
+    configuration_loaded = false;
+    api_key.clear();
+    workspace.clear();
+    assert(cJSON_IsTrue(cJSON_GetObjectItem(Parse(OmniPanel()).get(), "configured")));
+    assert(api_key == "dummy-secret");
+    OmniPanel(R"({"op":"clear"})");
+    configuration_loaded = false;
+    assert(!cJSON_IsTrue(cJSON_GetObjectItem(Parse(OmniPanel()).get(), "configured")));
     OmniRealtimeProtocol p;
+    // Real Enqueue production path: a slow consumer must pace a burst, not cancel it.
+    std::atomic<bool> producer_done{false};
+    std::thread producer([&] {
+        for (unsigned i = 0; i < 100; i++)
+            assert(p.Enqueue(new OmniRealtimeProtocol::Work{"event", true, false, p.epoch_}));
+        producer_done = true;
+    });
+    unsigned consumed = 0;
+    while (!producer_done || consumed < 100) {
+        OmniRealtimeProtocol::Work* w = nullptr;
+        if (xQueueReceive(p.queue_, &w, 0) == pdTRUE) {
+            delete w;
+            consumed++;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    producer.join();
+    assert(!p.cancel_ && !p.overloaded_ && consumed == 100);
     p.socket_ = std::make_unique<WebSocket>();
     unsigned opened = 0, audio = 0, starts = 0, stops = 0, errors = 0, reads = 0;
     p.OnAudioChannelOpened([&] { opened++; });

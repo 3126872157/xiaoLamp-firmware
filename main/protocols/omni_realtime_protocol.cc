@@ -7,13 +7,31 @@
 #include "application.h"
 #include "board.h"
 #include "omni_contract.h"
+#include "settings.h"
 
 namespace {
 std::mutex config_mutex;
 std::string workspace, api_key, region = "cn-beijing", status = "unconfigured", error;
+std::string last_stop_reason;
 std::function<std::string()> state_reader;
 std::atomic<bool> in_use{false};
 std::atomic<uint32_t> playback_sequence{0};
+std::atomic<uint32_t> receive_waits{0};
+bool configuration_loaded = false;
+void LoadConfiguration() {
+    if (configuration_loaded)
+        return;
+    configuration_loaded = true;
+    Settings saved("lamp_omni", false);
+    auto w = saved.GetString("workspace"), k = saved.GetString("key"),
+         r = saved.GetString("region");
+    if (omni::Credentials(w, k, r)) {
+        workspace = w;
+        api_key = k;
+        region = r;
+        status = "configured";
+    }
+}
 using Json = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
 Json Parse(const std::string& s) { return Json(cJSON_Parse(s.c_str()), cJSON_Delete); }
 std::string Str(const cJSON* j, const char* key) {
@@ -26,10 +44,14 @@ std::string Dump(const cJSON* j) {
     cJSON_free(p);
     return s;
 }
-void Status(const char* s, const char* e = "") {
+void Status(const char* s, const char* e = "", const char* reason = nullptr) {
     std::lock_guard lock(config_mutex);
     status = s;
     error = e;
+    if (reason)
+        last_stop_reason = reason;
+    else if (status == "failed")
+        last_stop_reason = e;
 }
 bool Identifier(const std::string& s) { return omni::Identifier(s); }
 }  // namespace
@@ -44,6 +66,7 @@ std::string OmniPanel(const std::string& request) {
     auto op = Str(body.get(), "op");
     if (op == "configure" || op == "clear") {
         std::lock_guard lock(config_mutex);
+        LoadConfiguration();
         if (in_use)
             return R"({"ok":false,"error":{"message":"Close Omni before changing credentials"}})";
         if (op == "clear") {
@@ -51,6 +74,11 @@ std::string OmniPanel(const std::string& request) {
             api_key.clear();
             workspace.clear();
             status = "unconfigured";
+            Settings saved("lamp_omni", true);
+            // Settings commits SetString writes; its erase helpers do not mark dirty.
+            saved.SetString("workspace", "");
+            saved.SetString("key", "");
+            saved.SetString("region", "");
         } else {
             auto w = Str(body.get(), "workspace"), k = Str(body.get(), "key"),
                  r = Str(body.get(), "region");
@@ -62,6 +90,10 @@ std::string OmniPanel(const std::string& request) {
             region = r;
             status = "configured";
             error.clear();
+            Settings saved("lamp_omni", true);
+            saved.SetString("workspace", workspace);
+            saved.SetString("region", region);
+            saved.SetString("key", api_key);
         }
     } else if (op == "start" || op == "vad") {
         if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle)
@@ -80,6 +112,7 @@ std::string OmniPanel(const std::string& request) {
         return R"({"ok":false,"error":{"message":"Unknown Omni operation"}})";
     }
     std::lock_guard lock(config_mutex);
+    LoadConfiguration();
     auto j = Json(cJSON_CreateObject(), cJSON_Delete);
     cJSON_AddBoolToObject(j.get(), "ok", true);
     cJSON_AddBoolToObject(j.get(), "enabled", true);
@@ -87,10 +120,13 @@ std::string OmniPanel(const std::string& request) {
     cJSON_AddBoolToObject(j.get(), "in_use", in_use);
     cJSON_AddStringToObject(j.get(), "status", status.c_str());
     cJSON_AddStringToObject(j.get(), "error", error.c_str());
+    cJSON_AddStringToObject(j.get(), "last_stop_reason", last_stop_reason.c_str());
     cJSON_AddStringToObject(j.get(), "workspace", workspace.c_str());
     cJSON_AddStringToObject(j.get(), "region", region.c_str());
     cJSON_AddStringToObject(j.get(), "model", "qwen3.8-omni-flash-realtime");
     cJSON_AddBoolToObject(j.get(), "cloud_motion_enabled", false);
+    cJSON_AddBoolToObject(j.get(), "credentials_persistent", true);
+    cJSON_AddNumberToObject(j.get(), "receive_backpressure_waits", receive_waits);
     return Dump(j.get());
 }
 
@@ -126,6 +162,16 @@ bool OmniRealtimeProtocol::Start() {
     return true;
 }
 bool OmniRealtimeProtocol::Enqueue(Work* w) {
+    if (w->incoming && queue_) {
+        // Bound memory and let TCP apply backpressure instead of cancelling a normal burst.
+        while (running_ && w->epoch == epoch_ && !close_ && !cancel_) {
+            if (xQueueSend(queue_, &w, pdMS_TO_TICKS(20)) == pdTRUE)
+                return true;
+            ++receive_waits;
+        }
+        delete w;
+        return false;  // Teardown invalidated this event; not an overflow failure.
+    }
     if (!running_ || !queue_ || xQueueSend(queue_, &w, 0) != pdTRUE) {
         delete w;
         overloaded_ = true;
@@ -139,6 +185,7 @@ bool OmniRealtimeProtocol::OpenAudioChannel() {
         return false;
     }
     std::lock_guard lock(config_mutex);
+    LoadConfiguration();
     if (api_key.empty()) {
         SetError("Configure Bailian credentials in the device web panel");
         return false;
@@ -175,7 +222,8 @@ void OmniRealtimeProtocol::SendStopListening() {
     recording_ = false;
     SendText("@finish");
 }
-void OmniRealtimeProtocol::SendAbortSpeaking(AbortReason) {
+void OmniRealtimeProtocol::SendAbortSpeaking(AbortReason reason) {
+    abort_reason_ = reason;
     recording_ = false;
     playback_ = 0;
     ++epoch_;
@@ -193,6 +241,7 @@ void OmniRealtimeProtocol::Fail(const char* message) {
     Status("failed", message);
     close_ = true;
     SetError(message);  // Never include provider payloads, headers or keys in diagnostics.
+    Board::GetInstance().RecordDiagnostic("voice_error", "omni", message);
 }
 std::string OmniRealtimeProtocol::Session(bool manual) {
     auto j = Parse(omni::Session());
@@ -339,6 +388,8 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
             Emit("start");
         }
         for (size_t offset = 0; offset < length; offset += 2880) {
+            if (!AcceptsPlayback(playback_))
+                break;
             auto p = std::make_unique<AudioStreamPacket>();
             p->sample_rate = 24000;
             p->frame_duration = 60;
@@ -449,7 +500,10 @@ void OmniRealtimeProtocol::Run() {
                 Write(R"({"type":"input_audio_buffer.clear"})");
             close_ = true;
             ready_ = false;
-            Status("cancelled");
+            const char* reason =
+                abort_reason_ == kAbortReasonWakeWordDetected ? "wake_word" : "operator_or_button";
+            Status("cancelled", "", reason);
+            Board::GetInstance().RecordDiagnostic("voice_cancel", "omni", reason);
         }
         Work* raw = nullptr;
         if (xQueueReceive(queue_, &raw, pdMS_TO_TICKS(20)) != pdTRUE)

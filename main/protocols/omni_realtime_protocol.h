@@ -6,7 +6,7 @@
 #include <atomic>
 #include "protocol.h"
 
-// LAN provisioning is RAM-only. Never return the key or persist it in NVS.
+// Developer credentials use a separate NVS namespace; never return or log the key.
 std::string OmniPanel(const std::string& request = "");
 void OmniSetStateReader(std::function<std::string()> reader);
 
@@ -20,7 +20,10 @@ public:
     bool IsAudioChannelOpened() const override { return ready_; }
     bool UsesPcmAudio() const override { return true; }
     bool OpensAsynchronously() const override { return true; }
-    bool AcceptsPlayback(uint32_t id) const override { return ready_ && id && id == playback_; }
+    bool AcceptsPlayback(uint32_t id) const override {
+        return running_ && ready_ && id && id == playback_;
+    }
+    void ReportPlaybackFailure(const std::string& message) override { Fail(message.c_str()); }
     bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) override;
     void SendStartListening(ListeningMode mode) override;
     void SendStopListening() override;
@@ -44,6 +47,7 @@ private:
     std::unique_ptr<WebSocket> socket_;
     std::atomic<bool> ready_{false}, running_{true}, open_{false}, close_{false}, cancel_{false};
     std::atomic<bool> disconnected_{false}, overloaded_{false}, recording_{false};
+    std::atomic<AbortReason> abort_reason_{kAbortReasonNone};
     std::atomic<uint32_t> epoch_{1}, playback_{0};
     bool speaking_ = false, had_audio_ = false;
     bool manual_ = true;
