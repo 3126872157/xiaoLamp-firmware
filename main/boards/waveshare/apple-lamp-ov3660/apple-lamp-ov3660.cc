@@ -6,6 +6,10 @@
 #include "esp32_camera.h"
 #include "lamp_bridge.h"
 #include "lamp_hardware_executor.h"
+#if CONFIG_APPLE_LAMP_EDGE_RUNTIME
+#include "lamp_edge_runtime.h"
+#include "omni_realtime_protocol.h"
+#endif
 #include "lamp_local_executor.h"
 #include "lamp_twin_web.h"
 #include "wifi_board.h"
@@ -119,7 +123,18 @@ public:
         InitializeCamera();
 #if CONFIG_APPLE_LAMP_HARDWARE_MOTION
         lamp_executor_ = new LampHardwareExecutor();
-#if CONFIG_APPLE_LAMP_OMNI_REALTIME
+#if CONFIG_APPLE_LAMP_EDGE_RUNTIME
+        auto* runtime = new LampEdgeRuntime(
+            *lamp_executor_, [this](const auto& kind, const auto& name, const auto& data) {
+                RecordDiagnostic(kind, name, data);
+            });
+        OmniSetRuntime([runtime](const auto& name, const auto& args,
+                                 uint64_t turn) { return runtime->Submit(name, args, turn); },
+                       [runtime](uint64_t turn) { runtime->Cancel(turn); },
+                       LampEdgeRuntime::Tools());
+        OmniSetStateReader([runtime] { return runtime->State(); });
+        ESP_LOGI(TAG, "Firmware role: EDGE-RUNTIME; semantic tools, operator enable required");
+#elif CONFIG_APPLE_LAMP_OMNI_REALTIME
         ESP_LOGI(TAG, "Firmware role: OMNI-POC; direct cloud PCM, read-only cloud tools");
 #elif CONFIG_APPLE_LAMP_TWIN_WEB
         ESP_LOGI(TAG, "Firmware role: LOCAL-TWIN; local web test panel, no startup motion");

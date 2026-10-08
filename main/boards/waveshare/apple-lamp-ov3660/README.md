@@ -1,3 +1,9 @@
+## Edge Runtime 首批（2026-10-08）
+
+独立构建 `python scripts/build_lamp_variant.py --role edge-runtime`，身份为 `apple-lamp-ov3660-edge-runtime`。基于同一Omni PCM与UART链增加有界Runtime语义工具：8项工具、异步确认、批次控制优先、完整Call ID及缓存、取消本轮拥有的任务。上电不使能；云动作仍需明确上力、释放网页手动控制和通过原路径安全检查。
+
+GET `/api/lamp/runtime` 读取缓存与能力。普通动作返回accepted；力矩、标定、休息等待真实反馈。一般告别只结束会话，台灯休息成功后才坐下卸力并告别。图片、陪伴、表达预备/实际播放同步、五分钟滚动与完整遥测未实现，保留原omni-poc角色。实施/进度见父项目docs/05。先软件演练，实机小范围由用户明确使能验证。
+
 # Apple Lamp OV3660：第一轮无屏适配
 
 2026-10-08 新增实验构建 `apple-lamp-ov3660-omni-poc`（`--role omni-poc`）。

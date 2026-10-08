@@ -4,11 +4,18 @@
 #include <freertos/semphr.h>
 #include <web_socket.h>
 #include <atomic>
+#include <future>
+#include <map>
 #include "protocol.h"
 
 // Developer credentials use a separate NVS namespace; never return or log the key.
 std::string OmniPanel(const std::string& request = "");
 void OmniSetStateReader(std::function<std::string()> reader);
+std::string OmniRuntimeState();
+void OmniSetRuntime(
+    std::function<std::future<std::string>(const std::string&, const std::string&, uint64_t)>
+        dispatch,
+    std::function<void(uint64_t)> cancel, const std::string& tools);
 
 class OmniRealtimeProtocol final : public Protocol {
 public:
@@ -56,8 +63,17 @@ private:
     bool manual_ = true;
     int64_t connecting_since_ = 0;
     int64_t recording_since_ = 0, session_since_ = 0;
-    std::string response_, cancelled_response_, transcript_, tool_call_, tool_output_;
-    std::string last_call_;
+    std::string response_, cancelled_response_, transcript_;
+    struct Tool {
+        std::string id, name, arguments, output;
+        std::future<std::string> result;
+    };
+    std::vector<Tool> tools_;
+    std::map<std::string, std::pair<std::string, std::string>> call_cache_;
+    std::atomic<uint64_t> turn_{0};
+    bool continuing_ = false, awaiting_tools_ = false;
+    unsigned tool_rounds_ = 0;
+    void CompleteTools();
     bool Enqueue(Work* work);
     bool Write(const std::string& text);
     void Run();

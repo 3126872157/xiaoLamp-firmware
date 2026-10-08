@@ -16,7 +16,7 @@ class OmniContractTests(unittest.TestCase):
             raise unittest.SkipTest('Host C++ compiler required')
         cls.binary = ROOT/'build'/('omni_contract_cli.exe' if os.name == 'nt' else 'omni_contract_cli')
         cjson = ROOT/'managed_components/espressif__cjson/cJSON'
-        subprocess.run([compiler, '-std=c++23', '-static', '-finput-charset=UTF-8',
+        subprocess.run([compiler, '-std=c++23', '-static', '-fno-rtti', '-finput-charset=UTF-8',
                         '-I', str(ROOT/'main/protocols'), '-I', str(cjson),
                         str(ROOT/'scripts/tests/omni_contract_cli.cc'), str(cjson/'cJSON.c'),
                         '-o', str(cls.binary)], check=True, capture_output=True)
@@ -73,11 +73,22 @@ class OmniContractTests(unittest.TestCase):
         m.validate_role(image,'omni-poc',sdk)
         with self.assertRaises(ValueError): m.validate_role(image,'local-twin',sdk)
 
+    def test_edge_role_cannot_be_mislabeled_as_poc(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('roles_edge', ROOT/'scripts/build_lamp_variant.py')
+        m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+        sdk = '\n'.join('CONFIG_'+s+'=y' for s in ('APPLE_LAMP_LOCAL_EXECUTOR', 'APPLE_LAMP_UART_PROBE',
+            'COMPILER_CXX_EXCEPTIONS', 'APPLE_LAMP_HARDWARE_MOTION', 'APPLE_LAMP_TWIN_WEB',
+            'APPLE_LAMP_OMNI_REALTIME', 'APPLE_LAMP_EDGE_RUNTIME'))
+        image = b'apple-lamp-ov3660-edge-runtime Firmware role: EDGE-RUNTIME'
+        m.validate_role(image, 'edge-runtime', sdk)
+        with self.assertRaises(ValueError): m.validate_role(image, 'omni-poc', sdk)
+
     def test_production_event_replay_and_cancellation(self):
         cjson = ROOT/'managed_components/espressif__cjson/cJSON'
         fixture = ROOT/'scripts/tests/fixtures/omni'
         binary = ROOT/'build'/('omni_events_cli.exe' if os.name == 'nt' else 'omni_events_cli')
-        subprocess.run([shutil.which('g++'), '-std=c++23', '-static', '-finput-charset=UTF-8',
+        subprocess.run([shutil.which('g++'), '-std=c++23', '-static', '-fno-rtti', '-finput-charset=UTF-8',
                         '-I', str(fixture), '-I', str(ROOT/'main/protocols'), '-I', str(cjson),
                         str(ROOT/'scripts/tests/omni_events_cli.cc'),str(cjson/'cJSON.c'),
                         '-o', str(binary)], check=True, capture_output=True)

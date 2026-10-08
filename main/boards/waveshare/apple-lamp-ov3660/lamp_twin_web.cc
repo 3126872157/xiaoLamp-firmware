@@ -63,6 +63,10 @@ esp_err_t Api(httpd_req_t* req) {
 #if CONFIG_APPLE_LAMP_OMNI_REALTIME
         if (path == "/api/lamp/omni")
             return Json(req, OmniPanel());
+#if CONFIG_APPLE_LAMP_EDGE_RUNTIME
+        if (path == "/api/lamp/runtime")
+            return Json(req, OmniRuntimeState());
+#endif
 #endif
         if (path == "/api/lamp/history") {
             char query[64]{}, value[24]{};
@@ -125,7 +129,7 @@ void StartLampTwinWeb(LampHardwareExecutor& executor) {
         snprintf(token + i * 8, 9, "%08lx", static_cast<unsigned long>(esp_random()));
     secret = token;
     device = &executor;
-#if CONFIG_APPLE_LAMP_OMNI_REALTIME
+#if CONFIG_APPLE_LAMP_OMNI_REALTIME && !CONFIG_APPLE_LAMP_EDGE_RUNTIME
     OmniSetStateReader([&executor] { return executor.State(); });
 #endif
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();

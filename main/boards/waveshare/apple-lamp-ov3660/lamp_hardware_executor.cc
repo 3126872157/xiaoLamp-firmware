@@ -1166,7 +1166,9 @@ void LampHardwareExecutor::HardwareLoop() {
         const uint8_t cmds[] = {26, 27, 30, 21};
         Read((telemetry / 4) % 5, cmds[telemetry % 4]);
         telemetry++;
-        CloseRestChat();
+#if !CONFIG_APPLE_LAMP_EDGE_RUNTIME
+        CloseRestChat();  // Edge Runtime closes only after confirmed rest and farewell playback.
+#endif
         vTaskDelay(pdMS_TO_TICKS(80));
     }
 }

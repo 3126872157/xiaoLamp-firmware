@@ -925,6 +925,9 @@ file(GLOB BOARD_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/*.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/*.c
 )
+if(NOT CONFIG_APPLE_LAMP_EDGE_RUNTIME)
+    list(REMOVE_ITEM BOARD_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/lamp_edge_runtime.cc")
+endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 
 # Select one audio engine for each chip family

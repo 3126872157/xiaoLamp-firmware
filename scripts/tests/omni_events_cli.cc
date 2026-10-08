@@ -108,9 +108,10 @@ int main() {
         R"({"type":"response.function_call_arguments.done","response_id":"r2","name":"lamp_get_state","call_id":"call_1","arguments":"{}"})";
     p.Receive(call);
     p.Receive(call);
-    assert(reads == 1);
+    assert(reads == 0);  // Complete response, not arguments alone, dispatches tools.
     p.Receive(R"({"type":"response.done","response":{"id":"r2","status":"completed"}})");
     assert(p.socket_->sent.back() == R"({"type":"response.create"})");
+    assert(reads == 1);
     auto result = Parse(p.socket_->sent[p.socket_->sent.size() - 2]);
     auto item = cJSON_GetObjectItem(result.get(), "item");
     assert(Str(item, "call_id") == "call_1");
@@ -127,10 +128,11 @@ int main() {
             R"({"type":"response.function_call_arguments.done","response_id":"rest1","name":"lamp_end_conversation","call_id":"rest_call","arguments":"{}"})";
         rest.Receive(request);
         rest.Receive(request);
-        assert(rest.WantsConversationEnd() && !rest.close_);
+        assert(!rest.WantsConversationEnd() && !rest.close_);
         rest.OnPlaybackDrained();
         assert(!rest.close_);  // Cannot close before the farewell response.
         rest.Receive(R"({"type":"response.done","response":{"id":"rest1","status":"completed"}})");
+        assert(rest.WantsConversationEnd());
         assert(rest.socket_->sent.back() == R"({"type":"response.create"})");
         rest.Receive(R"({"type":"response.created","response":{"id":"goodbye"}})");
         if (audible)
@@ -159,6 +161,37 @@ int main() {
     p.Receive(R"({"type":"response.created","response":{"id":"r4"}})");
     p.Receive(R"({"type":"response.audio.delta","response_id":"r4","delta":"@@"})");
     assert(errors == 1 && !p.ready_ && p.close_);
+    // Async runtime result must not block event handling, and duplicate IDs do not dispatch twice.
+    unsigned dispatched = 0, invalidated = 0;
+    std::promise<std::string> confirmation;
+    OmniSetRuntime(
+        [&](const std::string&, const std::string&, uint64_t) {
+            dispatched++;
+            return confirmation.get_future();
+        },
+        [&](uint64_t) { invalidated++; }, "[]");
+    OmniRealtimeProtocol async;
+    async.socket_ = std::make_unique<WebSocket>();
+    async.ready_ = true;
+    async.Receive(R"({"type":"response.created","response":{"id":"async"}})");
+    const auto control =
+        R"({"type":"response.function_call_arguments.done","response_id":"async","name":"lamp_set_torque","call_id":"opaque:call/1","arguments":"{\"enabled\":true}"})";
+    async.Receive(control);
+    async.Receive(control);
+    assert(dispatched == 0);
+    async.Receive(R"({"type":"response.done","response":{"id":"async","status":"completed"}})");
+    assert(dispatched == 1 && async.awaiting_tools_ && async.socket_->sent.empty());
+    confirmation.set_value(R"({"ok":true,"result":{"status":"completed"}})");
+    async.CompleteTools();
+    assert(!async.awaiting_tools_ && async.socket_->sent.size() == 2);
+    async.Receive(R"({"type":"response.created","response":{"id":"continue"}})");
+    async.Receive(
+        R"({"type":"response.function_call_arguments.done","response_id":"continue","name":"lamp_set_torque","call_id":"opaque:call/1","arguments":"{\"enabled\":true}"})");
+    async.Receive(R"({"type":"response.done","response":{"id":"continue","status":"completed"}})");
+    assert(dispatched == 1);
+    async.SendAbortSpeaking(kAbortReasonNone);
+    assert(invalidated > 0);
+    OmniSetRuntime({}, {}, "");
     auto info = OmniPanel();
     assert(info.find("dummy-secret") == std::string::npos);
     std::cout << "PASS handshake, PCM, stale response, function output/dedup, cancel and corrupt "
