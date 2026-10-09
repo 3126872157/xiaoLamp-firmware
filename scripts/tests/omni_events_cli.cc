@@ -342,6 +342,13 @@ int main() {
         observer.Receive(R"({"type":"session.updated","session":{"modalities":["text","audio"]}})");
     };
     observe("present", "nod");
+    assert(OmniRuntimeState().find("\"observation_fresh\":true") != std::string::npos);
+    assert(OmniRuntimeState().find("\"observation\":{") != std::string::npos);
+    auto repeated_state = Parse(OmniRuntimeState());
+    auto count_before = cJSON_GetArraySize(cJSON_GetObjectItem(repeated_state.get(), "runtime"));
+    AddObservationState(repeated_state.get());
+    assert(cJSON_GetArraySize(cJSON_GetObjectItem(repeated_state.get(), "runtime")) ==
+           count_before);
     assert(auto_actions == 0);  // Baseline never causes motion.
     observe("absent", "nod");
     assert(auto_actions == 0);  // Unarmed never causes motion.

@@ -317,8 +317,7 @@ std::string LampEdgeRuntime::State() {
     cJSON_AddNumberToObject(runtime, "snapshot_age_ms",
                             snapshot_at ? (esp_timer_get_time() - snapshot_at) / 1000 : -1);
     cJSON_AddBoolToObject(runtime, "runtime_ready", started_);
-    cJSON_AddBoolToObject(runtime, "vision_enabled", false);
-    cJSON_AddBoolToObject(runtime, "companion_enabled", false);
+    // Observation state belongs to the Omni connection and is merged at its API boundary.
     cJSON_AddBoolToObject(runtime, "speech_motion_sync", false);
     cJSON_AddNumberToObject(runtime, "queued_bytes", queued_bytes_);
     return lamp::Encode(j.get());
