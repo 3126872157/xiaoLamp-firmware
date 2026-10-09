@@ -8,6 +8,9 @@
 
 // Portable planning only. No clocks, UART, GPIO, torque or simulated completion.
 namespace lamp::pose {
+// TEMPORARY developer experiment. Restore validated posture envelopes before release.
+// This does not bypass URDF travel, collision checks or installed servo limits.
+inline constexpr bool kTemporaryModeLimitsDisabled = true;
 using Pose = std::array<double, 5>;
 struct Vec {
     double x = 0, y = 0, z = 0;

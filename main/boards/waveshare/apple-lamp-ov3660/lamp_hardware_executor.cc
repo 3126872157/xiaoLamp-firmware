@@ -552,6 +552,8 @@ std::string LampHardwareExecutor::State() {
                                            cJSON_CreateString("local_player"));
     cJSON_ReplaceItemInObjectCaseSensitive(o.get(), "motion_enabled", cJSON_CreateBool(armed_));
     cJSON_AddStringToObject(o.get(), "mode", Modes[mode_]);
+    cJSON_AddBoolToObject(o.get(), "mode_limits_enabled",
+                          !lamp::pose::kTemporaryModeLimitsDisabled);
     cJSON_AddBoolToObject(o.get(), "busy", !active_.empty() || !queued_.empty());
     cJSON_AddBoolToObject(o.get(), "requires_operator_enable", !armed_);
     cJSON_AddBoolToObject(o.get(), "light_supported", false);
@@ -1089,11 +1091,12 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
                 return;
             }
         }
-        RecordDiagnostic("motion_plan", id,
-                         "step=" + lamp::Encode(semantic.get()) +
-                             "; scale=" + std::to_string(plan.scale) +
-                             "; limited=" + (plan.limited ? "true" : "false") +
-                             "; duration_sec=" + std::to_string(plan.Duration()));
+        RecordDiagnostic(
+            "motion_plan", id,
+            "step=" + lamp::Encode(semantic.get()) + "; scale=" + std::to_string(plan.scale) +
+                "; limited=" + (plan.limited ? "true" : "false") + "; mode_limits_enabled=" +
+                (lamp::pose::kTemporaryModeLimitsDisabled ? "false" : "true") +
+                "; duration_sec=" + std::to_string(plan.Duration()));
         if (plan.scale < .25)
             RecordDiagnostic("attention", "特别关注/动作幅度被压缩",
                              "request=" + id + "; scale=" + std::to_string(plan.scale));

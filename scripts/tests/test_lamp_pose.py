@@ -77,6 +77,28 @@ class LampPoseTests(unittest.TestCase):
         self.assertFalse(self.run_plan(operation='plan', mode='stand', pose=invalid,
             step={'action_id':'execute_primitive','skill_id':'A01'})['ok'])
 
+    def test_temporary_mode_bypass_preserves_absolute_and_geometry_checks(self):
+        q = self.config['homes']['homes']['stand']['pose']
+        config = json.loads(json.dumps(self.config))
+        profile = config['profiles']['modes']['stand']
+        profile['targets'] = {}
+        for group in ['ranges', 'bodyRanges']:
+            for bounds in profile[group].values():
+                bounds.update(min=0, max=0)
+        plan = self.run_plan(operation='plan', mode='stand', pose=q, config=config,
+                             step={'action_id':'adjust_pose','direction':'up','size':'small'},
+                             times=[.6])
+        self.assertTrue(plan['ok'], plan)
+        self.assertFalse(plan['limited'], plan)
+        self.assertGreater(plan['samples'][-1]['pose']['wrist'], q['wrist'] + .05)
+        invalid = dict(q, wrist=3)
+        self.assertFalse(self.run_plan(operation='plan', mode='stand', pose=invalid,
+                             step={'action_id':'adjust_pose','direction':'up','size':'small'})['ok'])
+        unsafe = dict(baseYaw=0, shoulder=1.57, elbow=1.57, wrist=0, headRoll=0)
+        self.assertFalse(self.run_plan(pose=unsafe)['safe'])
+        self.assertFalse(self.run_plan(operation='plan', mode='stand', pose=unsafe,
+                             step={'action_id':'adjust_pose','direction':'up','size':'small'})['ok'])
+
     def test_stale_target_and_raw_angles_are_not_silently_accepted(self):
         q = self.config['homes']['homes']['stand']['pose']
         plan = self.run_plan(operation='plan', mode='stand', pose=q,

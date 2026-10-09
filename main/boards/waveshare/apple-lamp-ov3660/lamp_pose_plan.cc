@@ -507,12 +507,12 @@ Plan Build(const Configuration& config, int mode, const Pose& current, const cJS
                                          (skill == "A01" || skill == "A02" || skill == "A03" ||
                                           skill == "A16" || skill == "B01" || skill == "B02") &&
                                          Text(step, "target_id").empty();
-        if (relative_expression) {
-            // A posture label is not a hardware limit. Keep body envelopes but admit the
-            // actual measured baseline (including installation/settling differences).
-            // Wrist/yaw expressions use URDF travel + geometry, not a mandatory Home gate.
+        if (kTemporaryModeLimitsDisabled || relative_expression) {
+            // Developer bypass uses full URDF travel in every posture. When restored,
+            // relative expressions still admit the measured baseline; other actions
+            // use configured posture envelopes. Geometry/device checks remain active.
             for (int j = 0; j < 5; ++j) {
-                if (j == 0 || j == 3 || j == 4)
+                if (kTemporaryModeLimitsDisabled || j == 0 || j == 3 || j == 4)
                     profile.ranges[j] = {kJoints[j].lower - profile.home[j],
                                          kJoints[j].upper - profile.home[j]};
                 else {
