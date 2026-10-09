@@ -53,6 +53,7 @@ public:
         cJSON_AddNumberToObject(j.get(), "max_jpeg_bytes", 65536);
         cJSON_AddBoolToObject(j.get(), "periodic_observation", false);
         cJSON_AddNumberToObject(j.get(), "capture_duration_ms", duration_ms_);
+        cJSON_AddNumberToObject(j.get(), "capture_min_internal_bytes", capture_min_internal_);
         cJSON_AddNumberToObject(j.get(), "internal_free_bytes",
                                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
         cJSON_AddNumberToObject(j.get(), "internal_min_free_bytes",
@@ -83,9 +84,11 @@ private:
     std::shared_ptr<const OmniImage> frame_;
     std::string error_;
     int64_t requested_at_ = 0, duration_ms_ = 0;
+    int64_t capture_min_internal_ = -1;
     uint64_t sequence_ = 0;
     void Capture() {
         const auto start = esp_timer_get_time();
+        const bool monitored = heap_caps_monitor_local_minimum_free_size_start() == ESP_OK;
         CJsonUniquePtr full(cJSON_Parse(executor_.State().c_str()));
         CJsonUniquePtr pose(cJSON_CreateObject());
         for (auto* key : {"pose_rad", "model_version", "available", "busy"}) {
@@ -97,8 +100,13 @@ private:
             pose.get(), "configuration_fingerprint",
             std::to_string(std::hash<std::string>{}(executor_.PanelConfig())).c_str());
         auto result = camera_->CaptureJpeg(65536);
+        const auto capture_min =
+            monitored ? int64_t(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)) : -1;
+        if (monitored)
+            heap_caps_monitor_local_minimum_free_size_stop();
         std::lock_guard lock(mutex_);
         duration_ms_ = (esp_timer_get_time() - start) / 1000;
+        capture_min_internal_ = capture_min;
         busy_ = false;
         if (!result) {
             error_ = result.error();

@@ -94,7 +94,12 @@ private:
         camera_config.xclk_freq_hz = XCLK_FREQ_HZ;
         camera_config.ledc_timer = LEDC_TIMER_0;
         camera_config.ledc_channel = LEDC_CHANNEL_0;
+#if CONFIG_APPLE_LAMP_EDGE_RUNTIME
+        camera_config.pixel_format =
+            PIXFORMAT_JPEG;  // OV3660 encodes in-sensor; preserve SRAM for voice/TLS.
+#else
         camera_config.pixel_format = PIXFORMAT_RGB565;
+#endif
         camera_config.frame_size = FRAMESIZE_QVGA;
         camera_config.jpeg_quality = 12;
         camera_config.fb_count = 2;
