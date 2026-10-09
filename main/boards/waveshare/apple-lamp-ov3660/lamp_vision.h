@@ -96,9 +96,8 @@ private:
             if (item)
                 cJSON_AddItemToObject(pose.get(), key, cJSON_Duplicate(item, true));
         }
-        cJSON_AddStringToObject(
-            pose.get(), "configuration_fingerprint",
-            std::to_string(std::hash<std::string>{}(executor_.PanelConfig())).c_str());
+        cJSON_AddStringToObject(pose.get(), "configuration_fingerprint",
+                                executor_.ConfigurationFingerprint().c_str());
         auto result = camera_->CaptureJpeg(65536);
         const auto capture_min =
             monitored ? int64_t(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)) : -1;

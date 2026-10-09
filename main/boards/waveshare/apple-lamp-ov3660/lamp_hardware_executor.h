@@ -13,6 +13,7 @@ public:
                           const std::string& data);
     std::string Diagnostics(uint64_t after = 0);
     std::string PanelSubmit(const std::string& body);
+    std::string ConfigurationFingerprint();
     std::string PanelConfig(const std::string& candidate = "");
 
 private:

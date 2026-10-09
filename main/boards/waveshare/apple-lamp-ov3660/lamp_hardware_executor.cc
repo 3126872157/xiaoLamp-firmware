@@ -314,6 +314,13 @@ bool LampHardwareExecutor::SaveInstallation(const cJSON* mapping) {
     armed_ = false;
     return true;
 }
+std::string LampHardwareExecutor::ConfigurationFingerprint() {
+    std::lock_guard lock(mutex_);
+    if (!configuration_)
+        return "unavailable";
+    // Hash existing data; never clone/reparse the full action catalog just for camera metadata.
+    return std::to_string(std::hash<std::string>{}(lamp::Encode(configuration_->source.get())));
+}
 std::string LampHardwareExecutor::PanelConfig(const std::string& candidate) {
     std::lock_guard lock(mutex_);
     CJsonUniquePtr fallback(cJSON_Parse(lamp::pose::kDeviceConfiguration));
