@@ -5,6 +5,7 @@
 #include <esp_timer.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <algorithm>
 #include <mutex>
 #include "camera.h"
 #include "lamp_hardware_executor.h"
@@ -19,16 +20,39 @@ public:
         : camera_(camera), executor_(executor) {
         signal_ = xSemaphoreCreateBinary();
         TaskHandle_t task = nullptr;
-        ready_ = camera_ && signal_ &&
-                 xTaskCreate(
-                     [](void* p) {
-                         auto* self = static_cast<LampVision*>(p);
-                         for (;;) {
-                             if (xSemaphoreTake(self->signal_, portMAX_DELAY) == pdTRUE)
-                                 self->Capture();
-                         }
-                     },
-                     "lamp_camera", 8192, this, 1, &task) == pdPASS;
+        ready_ =
+            camera_ && signal_ &&
+            xTaskCreate(
+                [](void* p) {
+                    auto* self = static_cast<LampVision*>(p);
+                    for (;;) {
+                        if (xSemaphoreTake(self->signal_, pdMS_TO_TICKS(250)) == pdTRUE)
+                            self->Capture();
+                        else {
+                            bool due = false;
+                            {
+                                std::lock_guard lock(self->mutex_);
+                                due =
+                                    self->periodic_ && esp_timer_get_time() - self->requested_at_ >=
+                                                           int64_t(self->interval_s_) * 1000000;
+                            }
+                            if (due) {
+                                CJsonUniquePtr state(cJSON_Parse(self->executor_.State().c_str()));
+                                if (!cJSON_IsTrue(cJSON_GetObjectItem(state.get(), "busy")) &&
+                                    !cJSON_IsTrue(
+                                        cJSON_GetObjectItem(state.get(), "manual_control")) &&
+                                    heap_caps_get_free_size(MALLOC_CAP_INTERNAL) > 45000)
+                                    self->Request();
+                            }
+                        }
+                    }
+                },
+                "lamp_camera", 8192, this, 1, &task) == pdPASS;
+    }
+    void Periodic(bool enabled, unsigned seconds) {
+        std::lock_guard lock(mutex_);
+        periodic_ = enabled;
+        interval_s_ = std::clamp(seconds, 2u, 30u);
     }
     bool Request() {
         std::lock_guard lock(mutex_);
@@ -51,7 +75,8 @@ public:
         cJSON_AddBoolToObject(j.get(), "busy", busy_);
         cJSON_AddStringToObject(j.get(), "error", error_.c_str());
         cJSON_AddNumberToObject(j.get(), "max_jpeg_bytes", 65536);
-        cJSON_AddBoolToObject(j.get(), "periodic_observation", false);
+        cJSON_AddBoolToObject(j.get(), "periodic_observation", periodic_);
+        cJSON_AddNumberToObject(j.get(), "interval_s", interval_s_);
         cJSON_AddNumberToObject(j.get(), "capture_duration_ms", duration_ms_);
         cJSON_AddNumberToObject(j.get(), "capture_min_internal_bytes", capture_min_internal_);
         cJSON_AddNumberToObject(j.get(), "internal_free_bytes",
@@ -79,7 +104,8 @@ private:
     Camera* camera_;
     LampHardwareExecutor& executor_;
     SemaphoreHandle_t signal_ = nullptr;
-    bool ready_ = false, busy_ = false;
+    bool ready_ = false, busy_ = false, periodic_ = false;
+    unsigned interval_s_ = 5;
     std::mutex mutex_;
     std::shared_ptr<const OmniImage> frame_;
     std::string error_;
@@ -114,6 +140,8 @@ private:
         }
         auto frame = std::make_shared<OmniImage>();
         frame->jpeg = std::move(result->jpeg);
+        frame->luminance = result->luminance;
+        frame->luminance_valid = result->luminance_valid;
         frame->width = result->width;
         frame->height = result->height;
         frame->captured_at_us = start;

@@ -22,6 +22,16 @@ std::function<void(uint64_t)> runtime_cancel;
 std::string runtime_tools;
 std::function<std::shared_ptr<const OmniImage>()> image_reader;
 bool image_enabled = false;
+std::function<void(bool, unsigned)> vision_periodic;
+std::function<bool(const OmniImage&)> image_valid;
+bool companion_enabled = false, companion_actions = false;
+unsigned observation_interval_s = 5;
+std::atomic<bool> observation_once{false}, observation_reset{false};
+std::string observation_status = "disabled", observation_error, observation_cache;
+int64_t observation_at = 0;
+uint64_t observation_cached_frame = 0;
+unsigned observation_requests = 0, observation_preemptions = 0;
+int64_t last_autonomous_action = 0;
 std::string image_error;
 std::atomic<uint64_t> image_sent_frame{0};
 std::atomic<uint64_t> turn_sequence{0};
@@ -66,9 +76,13 @@ void Status(const char* s, const char* e = "", const char* reason = nullptr) {
 }
 }  // namespace
 
-void OmniSetVision(std::function<std::shared_ptr<const OmniImage>()> latest) {
+void OmniSetVision(std::function<std::shared_ptr<const OmniImage>()> latest,
+                   std::function<void(bool, unsigned)> periodic,
+                   std::function<bool(const OmniImage&)> valid) {
     std::lock_guard lock(config_mutex);
     image_reader = std::move(latest);
+    vision_periodic = std::move(periodic);
+    image_valid = std::move(valid);
 }
 void OmniSetStateReader(std::function<std::string()> reader) {
     std::lock_guard lock(config_mutex);
@@ -87,7 +101,32 @@ void OmniSetRuntime(
 std::string OmniPanel(const std::string& request) {
     auto body = Parse(request);
     auto op = Str(body.get(), "op");
-    if (op == "vision_on" || op == "vision_off") {
+    if (op == "companion" || op == "observe_once") {
+        std::lock_guard lock(config_mutex);
+        if (!image_reader || !in_use)
+            return R"({"ok":false,"error":{"message":"Start VAD conversation first; this experiment reuses that connection"}})";
+        if (op == "observe_once") {
+            observation_once = true;
+            observation_reset = true;
+        } else {
+            auto* enabled = cJSON_GetObjectItem(body.get(), "enabled");
+            auto* interval = cJSON_GetObjectItem(body.get(), "interval_s");
+            auto* actions = cJSON_GetObjectItem(body.get(), "actions");
+            if (!cJSON_IsBool(enabled) || !cJSON_IsNumber(interval) || interval->valuedouble < 2 ||
+                interval->valuedouble > 30 || interval->valuedouble != interval->valueint ||
+                !cJSON_IsBool(actions))
+                return R"({"ok":false,"error":{"message":"Expected enabled/actions booleans and interval_s 2..30"}})";
+            companion_enabled = cJSON_IsTrue(enabled);
+            if (companion_enabled)
+                observation_reset = true;
+            companion_actions = cJSON_IsTrue(actions);
+            observation_interval_s = interval->valueint;
+            if (vision_periodic)
+                vision_periodic(companion_enabled, observation_interval_s);
+            if (!companion_enabled)
+                observation_status = "disabled";
+        }
+    } else if (op == "vision_on" || op == "vision_off") {
         std::lock_guard lock(config_mutex);
         if (!image_reader || in_use)
             return R"({"ok":false,"error":{"message":"Close conversation before changing manual image input"}})";
@@ -167,6 +206,20 @@ std::string OmniPanel(const std::string& request) {
     cJSON_AddBoolToObject(j.get(), "manual_image_enabled", image_enabled);
     cJSON_AddStringToObject(j.get(), "image_error", image_error.c_str());
     cJSON_AddNumberToObject(j.get(), "image_sent_frame_id", image_sent_frame);
+    cJSON_AddBoolToObject(j.get(), "companion_enabled", companion_enabled);
+    cJSON_AddBoolToObject(j.get(), "companion_actions", companion_actions);
+    cJSON_AddNumberToObject(j.get(), "observation_interval_s", observation_interval_s);
+    cJSON_AddStringToObject(j.get(), "observation_status", observation_status.c_str());
+    cJSON_AddStringToObject(j.get(), "observation_error", observation_error.c_str());
+    cJSON_AddNumberToObject(j.get(), "observation_requests", observation_requests);
+    cJSON_AddNumberToObject(j.get(), "observation_preemptions", observation_preemptions);
+    cJSON_AddNumberToObject(j.get(), "observation_frame_id", observation_cached_frame);
+    const auto age = observation_at ? (esp_timer_get_time() - observation_at) / 1000 : -1;
+    cJSON_AddNumberToObject(j.get(), "observation_age_ms", age);
+    cJSON_AddBoolToObject(j.get(), "observation_fresh",
+                          age >= 0 && age <= observation_interval_s * 2000);
+    if (!observation_cache.empty())
+        cJSON_AddItemToObject(j.get(), "observation", cJSON_Parse(observation_cache.c_str()));
     return Dump(j.get());
 }
 
@@ -258,7 +311,7 @@ bool OmniRealtimeProtocol::SendText(const std::string& s) {
     return Enqueue(new Work{s, false, false, epoch_});
 }
 bool OmniRealtimeProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> p) {
-    if (!ready_ || !recording_ || rest_requested_)
+    if (!ready_ || (!recording_ && observation_phase_ == ObservationPhase::Idle) || rest_requested_)
         return true;
     if (!p->pcm16 || p->sample_rate != 16000 || p->payload.empty() || p->payload.size() > 8192)
         return false;
@@ -345,9 +398,11 @@ std::string OmniRealtimeProtocol::Session(bool manual) {
                     "conversation并简短告别；讨论告别或用户说自己休息不结束。"
                     "lamp_rest等待真实成功才告别，不成功就说明失败并保留会话。单独明确要求上力/"
                     "别用力调用lamp_set_torque。"
-                    "动作执行前只说准备执行，不能提前声称完成；用户明确命令优先于寒暄。"
+                    "明确的纯动作指令安静执行，不播准备、收到或成功；只有失败才简短提醒。普通问答只"
+                    "回答，不乱动。"
                     "图片仅在开启手动附图并且本轮实际收到新图片时可用，不能将旧图当实时画面。"
-                    "尚无自主视觉陪伴或随语音同步动作，不得声称已实现这些。"));
+                    "后台视觉仅明确开启后运行，观察正文不朗读。语音伴随动作尚未开放，不声称已实现"
+                    "。"));
         }
     }
     if (!manual)
@@ -413,6 +468,28 @@ void OmniRealtimeProtocol::Disconnect(bool notify) {
     }
     // The TLS destructor waits for its receive task. Invalidate anything queued during shutdown.
     ++epoch_;
+    observation_phase_ = ObservationPhase::Idle;
+    observation_frame_.reset();
+    observation_attempts_ = 0;
+    observation_response_.clear();
+    observation_text_.clear();
+    speech_prefill_.clear();
+    observation_deadline_ = sample_deadline_ = 0;
+    observed_frame_ = 0;
+    have_luminance_ = false;
+    model_commit_pending_ = sample_sent_ = false;
+    background_task_ = {};
+    {
+        std::lock_guard lock(config_mutex);
+        companion_enabled = false;
+        companion_actions = false;
+        observation_once = false;
+        observation_cache.clear();
+        observation_at = 0;
+        observation_status = "disabled";
+        if (vision_periodic)
+            vision_periodic(false, observation_interval_s);
+    }
     disconnected_ = false;
     Work* stale = nullptr;
     while (queue_ && xQueueReceive(queue_, &stale, 0) == pdTRUE)
@@ -462,6 +539,8 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
         return;
     }
     auto type = Str(j.get(), "type");
+    if (ObservationEvent(j.get(), type))
+        return;
     if (type == "session.created") {
         session_id_ = Str(cJSON_GetObjectItem(j.get(), "session"), "id");
         Write(Session(true));
@@ -736,6 +815,11 @@ bool OmniRealtimeProtocol::AppendImage() {
             "again";
         return false;
     }
+    return SendImageFrame(*frame);
+}
+bool OmniRealtimeProtocol::SendImageFrame(const OmniImage& value) {
+    const auto* frame = &value;
+    const auto age = esp_timer_get_time() - frame->captured_at_us;
     size_t size = 0;
     const std::string prefix = "{\"type\":\"input_image_buffer.append\",\"image\":\"";
     std::string data(prefix.size() + 4 * ((frame->jpeg.size() + 2) / 3) + 3, '\0');
@@ -749,14 +833,394 @@ bool OmniRealtimeProtocol::AppendImage() {
     if (!Write(data))
         return false;
     image_sent_frame = frame->frame_id;
-    Board::GetInstance().RecordDiagnostic("vision_upload", "manual_audio",
-                                          "frame=" + std::to_string(frame->frame_id) +
-                                              "; bytes=" + std::to_string(frame->jpeg.size()) +
-                                              "; age_ms=" + std::to_string(age / 1000));
+    Board::GetInstance().RecordDiagnostic(
+        "vision_upload",
+        observation_phase_ == ObservationPhase::Idle ? "manual_audio" : "ambient_audio",
+        "frame=" + std::to_string(frame->frame_id) + "; bytes=" +
+            std::to_string(frame->jpeg.size()) + "; age_ms=" + std::to_string(age / 1000));
     return true;
+}
+bool OmniRealtimeProtocol::QuietPacket(const std::string& pcm) const {
+    if (pcm.empty() || pcm.size() % 2)
+        return true;
+    uint64_t sum = 0;
+    for (size_t i = 0; i < pcm.size(); i += 2) {
+        const int value = int16_t(uint16_t(uint8_t(pcm[i])) | uint16_t(uint8_t(pcm[i + 1])) << 8);
+        sum += std::abs(value);
+    }
+    return sum / (pcm.size() / 2) <
+           500;  // Conservative foreground priority, not speaker/AEC interruption.
+}
+void OmniRealtimeProtocol::RestoreForeground(const char* reason, bool voice) {
+    if (observation_phase_ == ObservationPhase::Idle)
+        return;
+    if (observation_phase_ == ObservationPhase::Model) {
+        if (!observation_response_.empty())
+            cancelled_response_ = observation_response_;
+        Write(R"({"type":"response.cancel"})");
+    }
+    recording_ = false;
+    observation_phase_ = ObservationPhase::Restore;
+    restoring_for_voice_ = voice;
+    model_commit_pending_ = false;
+    if (voice) {
+        std::function<void(uint64_t)> cancel;
+        {
+            std::lock_guard lock(config_mutex);
+            ++observation_preemptions;
+            cancel = runtime_cancel;
+        }
+        if (cancel && observation_turn_)
+            cancel(observation_turn_);
+    }
+    Write(R"({"type":"input_audio_buffer.clear"})");
+    auto foreground = Parse(Session(manual_));
+    cJSON_DeleteItemFromObject(cJSON_GetObjectItem(foreground.get(), "session"), "audio");
+    Write(Dump(foreground.get()));
+    observation_deadline_ = esp_timer_get_time() + 5000000;
+    Board::GetInstance().RecordDiagnostic("observation_restore", "omni", reason);
+}
+void OmniRealtimeProtocol::PollObservation() {
+    const auto now = esp_timer_get_time();
+    if (observation_reset.exchange(false))
+        observation_attempts_ = 0;
+    if (!ready_ || close_ || cancel_ || rest_requested_)
+        return;
+    if (background_task_.valid() &&
+        background_task_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        Board::GetInstance().RecordDiagnostic("companion_task", "result", background_task_.get());
+    }
+    if (observation_attempts_ >= 2) {
+        std::lock_guard lock(config_mutex);
+        companion_enabled = companion_actions = false;
+        observation_once = false;
+        observation_status = "paused_after_two_failures";
+        if (vision_periodic)
+            vision_periodic(false, observation_interval_s);
+    }
+    if (observation_phase_ != ObservationPhase::Idle) {
+        bool enabled;
+        {
+            std::lock_guard lock(config_mutex);
+            enabled = companion_enabled;
+        }
+        if (!enabled && !observation_is_once_ && observation_phase_ != ObservationPhase::Restore) {
+            RestoreForeground("companion_disabled");
+            return;
+        }
+        if (observation_deadline_ && now > observation_deadline_) {
+            if (observation_phase_ == ObservationPhase::Restore) {
+                Fail("Observation config restore timed out; reopen foreground");
+                return;
+            }
+            {
+                std::lock_guard lock(config_mutex);
+                observation_error = "Observation timed out; no capability conclusion";
+            }
+            ++observation_attempts_;
+            RestoreForeground("timeout");
+            return;
+        }
+        if (observation_phase_ == ObservationPhase::Sample && now >= sample_deadline_) {
+            if (!sample_sent_) {
+                ++observation_attempts_;
+                RestoreForeground("No real microphone samples; no placeholder audio");
+                return;
+            }
+            if (!observation_frame_ || now - observation_frame_->captured_at_us > 30000000) {
+                ++observation_attempts_;
+                RestoreForeground("expired_frame");
+                return;
+            }
+            if (!SendImageFrame(*observation_frame_)) {
+                RestoreForeground("image_send_failed");
+                return;
+            }
+            observation_phase_ = ObservationPhase::Model;
+            model_commit_pending_ = true;
+            recording_ = false;
+            Write(R"({"type":"input_audio_buffer.commit"})");
+        }
+        return;
+    }
+    std::function<std::shared_ptr<const OmniImage>()> reader;
+    std::function<std::string()> state;
+    bool enabled;
+    unsigned interval;
+    {
+        std::lock_guard lock(config_mutex);
+        reader = image_reader;
+        state = state_reader;
+        enabled = companion_enabled;
+        interval = observation_interval_s;
+    }
+    const bool once = observation_once.load();
+    if (observation_attempts_ >= 2 || (!enabled && !once) || manual_ || !recording_ ||
+        !response_.empty() || awaiting_tools_ || speaking_ || !quiet_since_ ||
+        now - quiet_since_ < 2500000 || background_task_.valid())
+        return;
+    auto frame = reader ? reader() : nullptr;
+    if (!frame || frame->frame_id == observed_frame_ ||
+        now - frame->captured_at_us > int64_t(interval) * 2000000)
+        return;
+    auto hardware = Parse(state ? state() : "{}");
+    if (cJSON_IsTrue(cJSON_GetObjectItem(hardware.get(), "busy")) ||
+        cJSON_IsTrue(cJSON_GetObjectItem(hardware.get(), "manual_control")))
+        return;
+    if (!once && have_luminance_ && frame->luminance_valid) {
+        int mean = 0;
+        for (size_t i = 0; i < 192; i++)
+            mean += int(frame->luminance[i]) - int(observed_luminance_[i]);
+        mean /= 192;
+        unsigned change = 0;
+        for (size_t i = 0; i < 192; i++)
+            change += std::abs(int(frame->luminance[i]) - int(observed_luminance_[i]) - mean);
+        if (change / 192 < 12) {
+            observed_frame_ = frame->frame_id;
+            return;
+        }
+    }
+    observation_once = false;
+    observation_is_once_ = once;
+    observation_frame_ = frame;
+    observed_frame_ = frame->frame_id;
+    observed_luminance_ = frame->luminance;
+    have_luminance_ = frame->luminance_valid;
+    observation_response_.clear();
+    observation_text_.clear();
+    sample_sent_ = model_commit_pending_ = false;
+    restoring_for_voice_ = false;
+    observation_phase_ = ObservationPhase::Configure;
+    observation_deadline_ = now + 20000000;
+    auto config = Parse(Session(true));
+    auto* session = cJSON_GetObjectItem(config.get(), "session");
+    cJSON_DeleteItemFromObject(session, "audio");
+    cJSON_ReplaceItemInObject(session, "modalities", cJSON_Parse("[\"text\"]"));
+    cJSON_ReplaceItemInObject(session, "tools", cJSON_CreateArray());
+    const auto instruction =
+        std::string(
+            "这是独立后台视觉观察轮次，不是用户说话。真实麦克风片段只作环境采样，不把噪声解释成命令"
+            "，不回复历史用户发言。只观察这次新图片，只输出一个JSON对象，禁止语音和工具调用。schema"
+            "={frame_id:整数,person:present/absent/unknown,book:present/absent/"
+            "unknown,activity:reading/looking/away/"
+            "unknown,confidence:0到1,summary:简短客观中文,action:none/nod/tilt/gaze_user/"
+            "gaze_book}。看不清用unknown，不能猜坐标。默认action="
+            "none，仅有明显有意义事件才建议轻量动作。frame_id=") +
+        std::to_string(frame->frame_id);
+    cJSON_ReplaceItemInObject(session, "instructions", cJSON_CreateString(instruction.c_str()));
+    recording_ = false;
+    Write(R"({"type":"input_audio_buffer.clear"})");
+    Write(Dump(config.get()));
+    {
+        std::lock_guard lock(config_mutex);
+        observation_status = "configuring";
+        observation_error.clear();
+        ++observation_requests;
+    }
+    Board::GetInstance().RecordDiagnostic("observation_request", "ambient_real_audio",
+                                          "frame=" + std::to_string(frame->frame_id));
+}
+bool OmniRealtimeProtocol::ObservationEvent(const cJSON* j, const std::string& type) {
+    if (observation_phase_ == ObservationPhase::Idle) {
+        if (type == "input_audio_buffer.speech_started")
+            quiet_since_ = esp_timer_get_time();
+        return false;
+    }
+    if (type == "error") {
+        if (Str(cJSON_GetObjectItem(j, "error"), "code") == "response_cancel_not_active")
+            return true;
+        {
+            std::lock_guard lock(config_mutex);
+            observation_error = "Omni rejected observation event (" +
+                                Str(cJSON_GetObjectItem(j, "error"), "code") +
+                                "); inspect protocol/quota/network before fallback";
+        }
+        if (observation_phase_ != ObservationPhase::Restore) {
+            ++observation_attempts_;
+            RestoreForeground("api_error");
+        }
+        return true;
+    }
+    if (type == "session.updated") {
+        if (observation_phase_ == ObservationPhase::Configure) {
+            // Require the actual text-only configuration, not an unrelated late foreground ACK.
+            auto* session = cJSON_GetObjectItem(j, "session");
+            auto* modalities = cJSON_GetObjectItem(session, "modalities");
+            if (cJSON_GetArraySize(modalities) != 1 ||
+                !cJSON_IsString(cJSON_GetArrayItem(modalities, 0)) ||
+                std::string(cJSON_GetArrayItem(modalities, 0)->valuestring) != "text")
+                return true;
+            observation_phase_ = ObservationPhase::Sample;
+            sample_deadline_ = esp_timer_get_time() + 600000;
+            recording_ = true;
+            std::lock_guard lock(config_mutex);
+            observation_status = "sampling_real_audio";
+        } else if (observation_phase_ == ObservationPhase::Restore) {
+            auto* modalities = cJSON_GetObjectItem(cJSON_GetObjectItem(j, "session"), "modalities");
+            if (cJSON_GetArraySize(modalities) != 2 ||
+                !cJSON_IsString(cJSON_GetArrayItem(modalities, 0)) ||
+                !cJSON_IsString(cJSON_GetArrayItem(modalities, 1)) ||
+                std::string(cJSON_GetArrayItem(modalities, 0)->valuestring) != "text" ||
+                std::string(cJSON_GetArrayItem(modalities, 1)->valuestring) != "audio")
+                return true;
+            observation_phase_ = ObservationPhase::Idle;
+            observation_deadline_ = 0;
+            recording_ = true;
+            had_audio_ = false;
+            observation_frame_.reset();
+            if (!speech_prefill_.empty()) {
+                size_t n = 0;
+                std::string encoded(4 * ((speech_prefill_.size() + 2) / 3) + 1, '\0');
+                if (mbedtls_base64_encode(
+                        reinterpret_cast<unsigned char*>(encoded.data()), encoded.size(), &n,
+                        reinterpret_cast<const unsigned char*>(speech_prefill_.data()),
+                        speech_prefill_.size()) == 0) {
+                    encoded.resize(n);
+                    had_audio_ = true;
+                    Write("{\"type\":\"input_audio_buffer.append\",\"audio\":\"" + encoded + "\"}");
+                }
+                speech_prefill_.clear();
+            }
+            Status("listening_vad");
+        }
+        return true;
+    }
+    if (type == "input_audio_buffer.speech_started") {
+        RestoreForeground("server_voice", true);
+        return true;
+    }
+    if (type == "input_audio_buffer.committed") {
+        if (observation_phase_ == ObservationPhase::Model && model_commit_pending_) {
+            model_commit_pending_ = false;
+            Write(R"({"type":"response.create"})");
+        }
+        return true;
+    }
+    if (type == "response.created") {
+        const auto id = Str(cJSON_GetObjectItem(j, "response"), "id");
+        if (observation_phase_ == ObservationPhase::Restore)
+            cancelled_response_ = id;
+        else if (observation_phase_ == ObservationPhase::Model)
+            observation_response_ = id;
+        return true;
+    }
+    if (type == "response.text.delta" || type == "response.audio_transcript.delta") {
+        if (observation_phase_ == ObservationPhase::Model &&
+            Str(j, "response_id") == observation_response_ &&
+            observation_text_.size() + Str(j, "delta").size() <= 4096)
+            observation_text_ += Str(j, "delta");
+        return true;
+    }
+    if (type == "response.audio.delta" || type == "response.function_call_arguments.done") {
+        {
+            std::lock_guard lock(config_mutex);
+            observation_error = "Observation unexpectedly returned audio/tool; suppressed";
+        }
+        ++observation_attempts_;
+        RestoreForeground("unexpected_output");
+        return true;
+    }
+    if (type == "response.done") {
+        const auto* response = cJSON_GetObjectItem(j, "response");
+        if (observation_phase_ != ObservationPhase::Model ||
+            Str(response, "id") != observation_response_)
+            return true;
+        auto observed = Parse(observation_text_);
+        const auto* id = cJSON_GetObjectItem(observed.get(), "frame_id");
+        const auto* confidence = cJSON_GetObjectItem(observed.get(), "confidence");
+        const auto person = Str(observed.get(), "person"), book = Str(observed.get(), "book"),
+                   activity = Str(observed.get(), "activity"),
+                   action = Str(observed.get(), "action");
+        unsigned interval;
+        std::function<bool(const OmniImage&)> validate;
+        {
+            std::lock_guard lock(config_mutex);
+            interval = observation_interval_s;
+            validate = image_valid;
+        }
+        const auto result_age =
+            observation_frame_ ? esp_timer_get_time() - observation_frame_->captured_at_us : -1;
+        const bool valid =
+            result_age >= 0 && result_age <= int64_t(interval) * 2000000 &&
+            (!validate || (observation_frame_ && validate(*observation_frame_))) &&
+            Str(response, "status") == "completed" && cJSON_IsObject(observed.get()) &&
+            cJSON_GetArraySize(observed.get()) == 7 && cJSON_IsNumber(id) && observation_frame_ &&
+            id->valuedouble == double(observation_frame_->frame_id) && cJSON_IsNumber(confidence) &&
+            confidence->valuedouble >= 0 && confidence->valuedouble <= 1 &&
+            (person == "present" || person == "absent" || person == "unknown") &&
+            (book == "present" || book == "absent" || book == "unknown") &&
+            (activity == "reading" || activity == "looking" || activity == "away" ||
+             activity == "unknown") &&
+            cJSON_IsString(cJSON_GetObjectItem(observed.get(), "summary")) &&
+            Str(observed.get(), "summary").size() <= 640 &&
+            (action == "none" || action == "nod" || action == "tilt" || action == "gaze_user" ||
+             action == "gaze_book");
+        if (valid) {
+            observation_attempts_ = 0;
+            bool changed = false, actions = false;
+            {
+                std::lock_guard lock(config_mutex);
+                auto old = Parse(observation_cache);
+                changed =
+                    old && (Str(old.get(), "person") != person || Str(old.get(), "book") != book ||
+                            Str(old.get(), "activity") != activity);
+                observation_cache = Dump(observed.get());
+                observation_at = observation_frame_->captured_at_us;
+                observation_cached_frame = observation_frame_->frame_id;
+                observation_status = "observed";
+                observation_error.clear();
+                actions = companion_enabled && companion_actions;
+            }
+            Board::GetInstance().RecordDiagnostic("observation_result", "omni",
+                                                  Dump(observed.get()));
+            std::function<std::string()> state;
+            decltype(runtime_dispatch) dispatch;
+            {
+                std::lock_guard lock(config_mutex);
+                state = state_reader;
+                dispatch = runtime_dispatch;
+            }
+            auto hardware = Parse(state ? state() : "{}");
+            const auto now = esp_timer_get_time();
+            if (changed && actions && confidence->valuedouble >= .7 && dispatch &&
+                now - last_autonomous_action >= 15000000 &&
+                cJSON_IsTrue(cJSON_GetObjectItem(hardware.get(), "motion_enabled")) &&
+                cJSON_IsTrue(cJSON_GetObjectItem(hardware.get(), "torque_enabled_confirmed")) &&
+                !cJSON_IsTrue(cJSON_GetObjectItem(hardware.get(), "busy")) &&
+                !cJSON_IsTrue(cJSON_GetObjectItem(hardware.get(), "manual_control")) &&
+                Str(hardware.get(), "mode") != "work") {
+                std::string args;
+                if (action == "nod" || action == "tilt")
+                    args = "{\"steps\":[{\"action_id\":\"execute_primitive\",\"skill_id\":\"" +
+                           std::string(action == "nod" ? "A01" : "B02") +
+                           "\",\"options\":{\"end_mode\":\"return_to_reference\"}}]}";
+                else if (action == "gaze_user" || action == "gaze_book")
+                    args = "{\"steps\":[{\"action_id\":\"gaze_calibrated\",\"target_id\":\"" +
+                           std::string(action == "gaze_user" ? "user" : "book") + "\"}]}";
+                if (!args.empty()) {
+                    turn_ = observation_turn_ = ++turn_sequence;
+                    background_task_ = dispatch("lamp_run_sequence", args, turn_);
+                    last_autonomous_action = now;
+                }
+            }
+        } else {
+            ++observation_attempts_;
+            std::lock_guard lock(config_mutex);
+            observation_status = "invalid_result";
+            observation_error =
+                "Invalid/stale structured observation; not sent to speaker or hardware";
+        }
+        observation_response_.clear();  // Already completed: no redundant cancellation.
+        observation_phase_ =
+            ObservationPhase::Sample;  // Restore helper without cancelling a finished response.
+        RestoreForeground(valid ? "completed" : "invalid_result");
+        return true;
+    }
+    return type.starts_with("response.");
 }
 void OmniRealtimeProtocol::Run() {
     while (running_) {
+        PollObservation();
         if (awaiting_tools_ && ready_ && !close_ && !cancel_)
             CompleteTools();
         if (close_.exchange(false) || disconnected_.exchange(false))
@@ -802,6 +1266,24 @@ void OmniRealtimeProtocol::Run() {
         if (!ready_)
             continue;
         if (w->audio) {
+            const bool quiet = QuietPacket(w->text);
+            if (!quiet) {
+                quiet_since_ = esp_timer_get_time();
+                if (observation_phase_ == ObservationPhase::Restore)
+                    restoring_for_voice_ = true;
+                if (observation_phase_ != ObservationPhase::Idle &&
+                    observation_phase_ != ObservationPhase::Restore)
+                    RestoreForeground("foreground_voice", true);
+            } else if (!quiet_since_)
+                quiet_since_ = esp_timer_get_time();
+            if (observation_phase_ == ObservationPhase::Restore) {
+                if (restoring_for_voice_ && speech_prefill_.size() + w->text.size() <= 32768)
+                    speech_prefill_ += w->text;
+                continue;
+            }
+            if (observation_phase_ == ObservationPhase::Configure ||
+                observation_phase_ == ObservationPhase::Model)
+                continue;
             size_t length = 0;
             std::string encoded(4 * ((w->text.size() + 2) / 3) + 1, '\0');
             if (mbedtls_base64_encode(
@@ -813,6 +1295,8 @@ void OmniRealtimeProtocol::Run() {
             encoded.resize(length);
             if (Write("{\"type\":\"input_audio_buffer.append\",\"audio\":\"" + encoded + "\"}"))
                 had_audio_ = true;
+            if (observation_phase_ == ObservationPhase::Sample)
+                sample_sent_ = true;
         } else if (w->text == "@manual" || w->text == "@vad") {
             if (rest_requested_)
                 continue;

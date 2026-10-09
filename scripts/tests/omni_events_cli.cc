@@ -267,6 +267,117 @@ int main() {
     assert(OmniPanel(R"({"op":"vad"})").find("Disable manual image") != std::string::npos);
     OmniPanel(R"({"op":"vision_off"})");
     assert(visual.AppendImage() && visual.socket_->sent.size() == 3);
+    // Production same-connection observation state machine: no speaker output, no auto torque.
+    omni_test_time = 20000000;
+    photo->frame_id = 10;
+    photo->captured_at_us = omni_test_time;
+    photo->luminance_valid = true;
+    photo->luminance.fill(20);
+    OmniSetVision([&]() -> std::shared_ptr<const OmniImage> { return photo; });
+    unsigned auto_actions = 0, speaker_events = 0, owned_cancel = 0;
+    std::string hardware_state =
+        R"({"motion_enabled":false,"torque_enabled_confirmed":false,"mode":"stand"})";
+    OmniSetStateReader([&] { return hardware_state; });
+    OmniSetRuntime(
+        [&](const std::string& name, const std::string& args, uint64_t) {
+            assert(name == "lamp_run_sequence" &&
+                   args.find("enable_if_needed") == std::string::npos);
+            ++auto_actions;
+            std::promise<std::string> done;
+            auto future = done.get_future();
+            done.set_value(R"({"ok":true,"status":"started"})");
+            return future;
+        },
+        [&](uint64_t) { ++owned_cancel; }, "[]");
+    OmniRealtimeProtocol observer;
+    observer.socket_ = std::make_unique<WebSocket>();
+    observer.ready_ = true;
+    observer.manual_ = false;
+    observer.recording_ = true;
+    observer.quiet_since_ = omni_test_time - 3000000;
+    observer.OnIncomingJson([&](const cJSON*) { ++speaker_events; });
+    companion_enabled = companion_actions = true;
+    observer.PollObservation();
+    assert(observer.observation_phase_ == OmniRealtimeProtocol::ObservationPhase::Configure);
+    assert(observer.socket_->sent.back().find("\"modalities\":[\"text\"]") != std::string::npos);
+    assert(observer.socket_->sent.back().find("\"audio\":{") == std::string::npos);
+    observer.Receive(R"({"type":"session.updated","session":{"modalities":["text","audio"]}})");
+    assert(observer.observation_phase_ == OmniRealtimeProtocol::ObservationPhase::Configure);
+    observer.Receive(R"({"type":"session.updated","session":{"modalities":["text"]}})");
+    assert(observer.observation_phase_ == OmniRealtimeProtocol::ObservationPhase::Sample);
+    // No audio => do not commit an empty audio buffer or manufacture a user utterance.
+    observer.sample_deadline_ = 0;
+    observer.PollObservation();
+    assert(observer.observation_phase_ == OmniRealtimeProtocol::ObservationPhase::Restore);
+    observer.Receive(R"({"type":"session.updated","session":{"modalities":["text","audio"]}})");
+    assert(observer.observation_phase_ == OmniRealtimeProtocol::ObservationPhase::Idle);
+    auto observe = [&](const std::string& person, const std::string& action, bool stale = false) {
+        photo->frame_id++;
+        photo->captured_at_us = omni_test_time;
+        observation_once = true;
+        observer.PollObservation();
+        assert(observer.observation_phase_ == OmniRealtimeProtocol::ObservationPhase::Configure);
+        observer.Receive(R"({"type":"session.updated","session":{"modalities":["text"]}})");
+        observer.Write(R"({"type":"input_audio_buffer.append","audio":"AAAA"})");
+        observer.sample_sent_ = true;
+        observer.sample_deadline_ = 0;
+        observer.PollObservation();
+        assert(observer.socket_->sent.back().find("input_audio_buffer.commit") !=
+               std::string::npos);
+        assert(observer.socket_->sent[observer.socket_->sent.size() - 2].find(
+                   "input_image_buffer.append") != std::string::npos);
+        observer.Receive(R"({"type":"input_audio_buffer.committed"})");
+        assert(observer.socket_->sent.back().find("response.create") != std::string::npos);
+        observer.Receive(R"({"type":"response.created","response":{"id":"background"}})");
+        observer.observation_text_ =
+            "{\"frame_id\":" + std::to_string(photo->frame_id) + ",\"person\":\"" + person +
+            "\",\"book\":\"unknown\",\"activity\":\"looking\",\"confidence\":0.9,\"summary\":"
+            "\"observation\",\"action\":\"" +
+            action + "\"}";
+        if (stale)
+            photo->captured_at_us = omni_test_time - 10000001;
+        observer.Receive(
+            R"({"type":"response.done","response":{"id":"background","status":"completed"}})");
+        assert(observer.observation_phase_ == OmniRealtimeProtocol::ObservationPhase::Restore);
+        observer.Receive(R"({"type":"session.updated","session":{"modalities":["text","audio"]}})");
+    };
+    observe("present", "nod");
+    assert(auto_actions == 0);  // Baseline never causes motion.
+    observe("absent", "nod");
+    assert(auto_actions == 0);  // Unarmed never causes motion.
+    hardware_state = R"({"motion_enabled":true,"torque_enabled_confirmed":true,"mode":"work"})";
+    observe("present", "nod");
+    assert(auto_actions == 0);  // Work is not preempted.
+    hardware_state =
+        R"({"motion_enabled":true,"torque_enabled_confirmed":true,"mode":"stand","manual_control":true})";
+    photo->frame_id++;
+    observation_once = true;
+    observer.PollObservation();
+    assert(observer.observation_phase_ == OmniRealtimeProtocol::ObservationPhase::Idle);
+    observation_once = false;
+    hardware_state = R"({"motion_enabled":true,"torque_enabled_confirmed":true,"mode":"stand"})";
+    observe("absent", "nod");
+    assert(auto_actions == 1);
+    observer.PollObservation();  // Consume the asynchronous acceptance, not mechanical completion.
+    const auto saved_frame = observation_cached_frame;
+    observe("present", "nod", true);
+    assert(auto_actions == 1 && observation_cached_frame == saved_frame);
+    assert(speaker_events == 0);
+    // Foreground voice invalidates only owned background motion and restores actual VAD config.
+    observer.observation_phase_ = OmniRealtimeProtocol::ObservationPhase::Model;
+    observer.observation_response_ = "background";
+    observer.RestoreForeground("test_voice", true);
+    assert(owned_cancel == 1);
+    observer.speech_prefill_ = std::string(1920, '\0');
+    observer.Receive(R"({"type":"session.updated","session":{"modalities":["text","audio"]}})");
+    assert(observer.socket_->sent.back().find("input_audio_buffer.append") != std::string::npos);
+    assert(observer.had_audio_ && observer.speech_prefill_.empty());
+    assert(observer.QuietPacket(std::string(1920, '\0')));
+    assert(!observer.QuietPacket(std::string(1920, '\x7f')));
+    observer.Disconnect(false);
+    assert(!companion_enabled && observation_cache.empty());
+    OmniSetRuntime({}, {}, "");
+    OmniSetStateReader({});
     OmniSetVision({});
     auto info = OmniPanel();
     assert(info.find("dummy-secret") == std::string::npos);

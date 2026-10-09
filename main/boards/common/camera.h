@@ -1,6 +1,7 @@
 #ifndef CAMERA_H
 #define CAMERA_H
 
+#include <array>
 #include <cstdint>
 #include <expected>
 #include <string>
@@ -8,6 +9,8 @@
 
 struct CameraJpegFrame {
     std::vector<uint8_t> jpeg;
+    std::array<uint8_t, 192> luminance{};
+    bool luminance_valid = false;
     unsigned width = 0, height = 0;
 };
 

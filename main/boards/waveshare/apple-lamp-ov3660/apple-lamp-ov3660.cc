@@ -135,7 +135,31 @@ public:
                        [runtime](uint64_t turn) { runtime->Cancel(turn); },
                        LampEdgeRuntime::Tools());
         auto* vision = new LampVision(camera_, *hardware);
-        OmniSetVision([vision] { return vision->Latest(); });
+        OmniSetVision(
+            [vision] { return vision->Latest(); },
+            [vision](bool enabled, unsigned seconds) { vision->Periodic(enabled, seconds); },
+            [hardware](const OmniImage& frame) {
+                CJsonUniquePtr captured(cJSON_Parse(frame.capture_state.c_str()));
+                auto* fingerprint =
+                    cJSON_GetObjectItem(captured.get(), "configuration_fingerprint");
+                if (!cJSON_IsString(fingerprint) ||
+                    hardware->ConfigurationFingerprint() != fingerprint->valuestring)
+                    return false;
+                CJsonUniquePtr current(cJSON_Parse(hardware->State().c_str()));
+                auto* before = cJSON_GetObjectItem(captured.get(), "pose_rad");
+                auto* after = cJSON_GetObjectItem(current.get(), "pose_rad");
+                if (!cJSON_IsObject(before) || !cJSON_IsObject(after))
+                    return !cJSON_IsTrue(cJSON_GetObjectItem(captured.get(), "available")) &&
+                           !cJSON_IsTrue(cJSON_GetObjectItem(current.get(), "available"));
+                for (auto* key : {"baseYaw", "shoulder", "elbow", "wrist", "headRoll"}) {
+                    auto* a = cJSON_GetObjectItem(before, key);
+                    auto* b = cJSON_GetObjectItem(after, key);
+                    if (!cJSON_IsNumber(a) || !cJSON_IsNumber(b) ||
+                        std::abs(a->valuedouble - b->valuedouble) > .05)
+                        return false;
+                }
+                return true;
+            });
         SetLampVision(vision);
         OmniSetStateReader([runtime] { return runtime->State(); });
         ESP_LOGI(TAG, "Firmware role: EDGE-RUNTIME; semantic tools, operator enable required");

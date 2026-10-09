@@ -169,6 +169,18 @@ std::expected<CameraJpegFrame, std::string> Esp32Camera::CaptureJpeg(size_t max_
     }
     if (current_fb_->format != PIXFORMAT_RGB565)
         return std::unexpected("Unsupported local capture pixel format");
+    // Spatial thumbnail before JPEG compression; do not mistake encoder noise for scene motion.
+    for (unsigned y = 0; y < 12; ++y)
+        for (unsigned x = 0; x < 16; ++x) {
+            const unsigned px = (2 * x + 1) * frame.width / 32,
+                           py = (2 * y + 1) * frame.height / 24;
+            const auto offset = 2 * (py * frame.width + px);
+            const unsigned pixel = encode_buf_[offset] | unsigned(encode_buf_[offset + 1]) << 8;
+            const unsigned r = ((pixel >> 11) & 31) * 255 / 31, g = ((pixel >> 5) & 63) * 255 / 63,
+                           b = (pixel & 31) * 255 / 31;
+            frame.luminance[y * 16 + x] = (r * 77 + g * 150 + b * 29) / 256;
+        }
+    frame.luminance_valid = true;
     struct Output {
         std::vector<uint8_t>* bytes;
         size_t max;

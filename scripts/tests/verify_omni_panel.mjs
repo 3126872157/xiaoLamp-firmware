@@ -47,11 +47,22 @@ try {
   edge = true; await page.reload();
   await page.waitForFunction(()=>document.querySelector('#runtime-status').textContent.includes('semantic_tools'));
   assert.match(await page.locator('#omni-capability').innerText(), /退出网页手动控制/);
-  await page.locator('#vision-panel summary').click();
+  await page.locator('#vision-panel > summary').click();
   await page.locator('#vision-capture').click();
   await page.waitForFunction(()=>{const i=document.querySelector('#vision-preview');return i.complete&&i.naturalWidth===16});
   assert.equal(await page.locator('#vision-preview').evaluate(i=>i.naturalHeight),12);
   for(const op of ['vision_on','vision_off']){await page.locator(`[data-omni="${op}"]`).click();await page.waitForFunction(op=>!document.querySelector(`[data-omni="${op}"]`).disabled,op);}
+  await page.locator('#vision-panel details summary').click();
+  await page.locator('#companion-interval').fill('10');
+  await page.locator('#companion-start').click();
+  await page.waitForFunction(()=>!document.querySelector('#companion-start').disabled);
+  assert.deepEqual(operations.at(-1),{op:'companion',enabled:true,actions:false,interval_s:10});
+  await page.locator('#companion-stop').click();
+  await page.waitForFunction(()=>!document.querySelector('#companion-stop').disabled);
+  assert.equal(operations.at(-1).enabled,false);
+  await page.locator('#observe-once').click();
+  await page.waitForFunction(()=>!document.querySelector('#observe-once').disabled);
+  assert.equal(operations.at(-1).op,'observe_once');
   assert.deepEqual(errors,[]);
   console.log('PASS mobile panel: token, configuration, cleared key and all controls; mocked HTTP');
 } finally { await browser.close(); }

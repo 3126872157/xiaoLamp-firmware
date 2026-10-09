@@ -3,6 +3,7 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <web_socket.h>
+#include <array>
 #include <atomic>
 #include <future>
 #include <map>
@@ -10,12 +11,16 @@
 
 struct OmniImage {
     std::vector<uint8_t> jpeg;
+    std::array<uint8_t, 192> luminance{};
+    bool luminance_valid = false;
     uint64_t frame_id = 0;
     int64_t captured_at_us = 0;
     unsigned width = 0, height = 0;
     std::string capture_state;
 };
-void OmniSetVision(std::function<std::shared_ptr<const OmniImage>()> latest);
+void OmniSetVision(std::function<std::shared_ptr<const OmniImage>()> latest,
+                   std::function<void(bool, unsigned)> periodic = {},
+                   std::function<bool(const OmniImage&)> valid = {});
 
 // Developer credentials use a separate NVS namespace; never return or log the key.
 std::string OmniPanel(const std::string& request = "");
@@ -84,6 +89,23 @@ private:
     unsigned tool_rounds_ = 0;
     void CompleteTools();
     bool AppendImage();
+    enum class ObservationPhase { Idle, Configure, Sample, Model, Restore };
+    std::atomic<ObservationPhase> observation_phase_{ObservationPhase::Idle};
+    std::shared_ptr<const OmniImage> observation_frame_;
+    int64_t observation_deadline_ = 0, sample_deadline_ = 0, quiet_since_ = 0;
+    uint64_t observed_frame_ = 0, observation_turn_ = 0;
+    std::string observation_response_, observation_text_;
+    std::string speech_prefill_;
+    std::array<uint8_t, 192> observed_luminance_{};
+    bool have_luminance_ = false, sample_sent_ = false, model_commit_pending_ = false;
+    bool restoring_for_voice_ = false, observation_is_once_ = false;
+    unsigned observation_attempts_ = 0;
+    std::future<std::string> background_task_;
+    void PollObservation();
+    bool ObservationEvent(const cJSON* j, const std::string& type);
+    void RestoreForeground(const char* reason, bool voice = false);
+    bool SendImageFrame(const OmniImage& frame);
+    bool QuietPacket(const std::string& pcm) const;
     bool Enqueue(Work* work);
     bool Write(const std::string& text);
     void Run();
