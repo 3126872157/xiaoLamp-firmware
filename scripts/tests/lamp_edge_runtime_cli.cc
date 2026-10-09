@@ -72,6 +72,14 @@ int main() {
         runtime.Submit("lamp_prepare_expression", R"({"speech":42,"action":"nod"})", 2);
     runtime.Tick();
     assert(invalid_speech.get().find("speech accepts") != std::string::npos);
+    auto four_nods = runtime.Submit("lamp_prepare_expression",
+                                    R"({"skill_id":"A01","speak":true,"repetitions":4})", 2);
+    runtime.Tick();
+    assert(four_nods.get().find("\"repetitions\":4") != std::string::npos);
+    auto six_nods =
+        runtime.Submit("lamp_prepare_expression", R"({"skill_id":"A01","repetitions":6})", 2);
+    runtime.Tick();
+    assert(six_nods.get().find("1..5") != std::string::npos);
     executor.online = executor.armed = false;
     const std::string group =
         R"({"steps":[{"action_id":"adjust_pose","direction":"yaw_positive","size":"small"}]})";

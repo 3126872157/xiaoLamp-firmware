@@ -567,6 +567,12 @@ int main() {
     silent.turn_input_item_ = "u1";
     silent.user_transcripts_["u1"] = "一边说话一边点头";
     assert(silent.ExplicitExpression().first == "A01" && !silent.ExplicitExpression().second);
+    silent.user_transcripts_["u1"] = "你一边说话边点两下头";
+    assert(silent.ExplicitExpression().first == "A01" && silent.ExplicitNodRepetitions() == 0);
+    silent.user_transcripts_["u1"] = "一边说话一边点头，头点四次";
+    assert(silent.ExplicitExpression().first == "A01" && silent.ExplicitNodRepetitions() == 4);
+    silent.user_transcripts_["u1"] = "不要点四下头，只说话";
+    assert(silent.ExplicitExpression().first.empty());
     silent.user_transcripts_["u1"] = "点头不要说话";
     assert(silent.ExplicitExpression().second);
     silent.user_transcripts_["u1"] = "只说话不要点头";

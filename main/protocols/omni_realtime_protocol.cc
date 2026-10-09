@@ -1759,6 +1759,12 @@ std::pair<std::string, bool> OmniRealtimeProtocol::ExplicitExpression() const {
     for (const auto& entry : {std::pair{"点头", "A01"},
                               {"点点头", "A01"},
                               {"点一下头", "A01"},
+                              {"点两下头", "A01"},
+                              {"点三下头", "A01"},
+                              {"点四下头", "A01"},
+                              {"点五下头", "A01"},
+                              {"点两次头", "A01"},
+                              {"点四次头", "A01"},
                               {"摇头", "B01"},
                               {"摇下头", "B01"},
                               {"摇一下头", "B01"},
@@ -1775,6 +1781,20 @@ std::pair<std::string, bool> OmniRealtimeProtocol::ExplicitExpression() const {
     }
     return {};
 }
+unsigned OmniRealtimeProtocol::ExplicitNodRepetitions() const {
+    const auto found = user_transcripts_.find(turn_input_item_);
+    if (found == user_transcripts_.end())
+        return 0;
+    static constexpr const char* counts[] = {"三", "四", "五", "六", "七", "八", "九"};
+    for (unsigned n = 3; n <= 9; ++n)
+        for (const auto& count : {std::string(counts[n - 3]), std::to_string(n)})
+            if (found->second.find("点" + count + "下") != std::string::npos ||
+                found->second.find("点" + count + "次") != std::string::npos ||
+                found->second.find("点头" + count + "下") != std::string::npos ||
+                found->second.find("点头" + count + "次") != std::string::npos)
+                return n;  // Runtime rejects >5; never silently substitutes two for six.
+    return 0;              // One/two retain the established local default of two.
+}
 void OmniRealtimeProtocol::PrepareFallback() {
     const auto intent = ExplicitExpression();
     if (intent.first.empty() || response_motion_tool_ || expression_used_turn_ == turn_ ||
@@ -1790,10 +1810,12 @@ void OmniRealtimeProtocol::PrepareFallback() {
         return;
     fallback_skill_ = intent.first;
     fallback_silent_ = intent.second;
-    fallback_prepare_ = dispatch("lamp_prepare_expression",
-                                 "{\"skill_id\":\"" + intent.first +
-                                     "\",\"speak\":" + (intent.second ? "false" : "true") + "}",
-                                 turn_);
+    const auto repetitions = intent.first == "A01" ? ExplicitNodRepetitions() : 0;
+    fallback_prepare_ = dispatch(
+        "lamp_prepare_expression",
+        "{\"skill_id\":\"" + intent.first + "\",\"speak\":" + (intent.second ? "false" : "true") +
+            (repetitions ? ",\"repetitions\":" + std::to_string(repetitions) : "") + "}",
+        turn_);
     response_motion_tool_ = true;
     Board::GetInstance().RecordDiagnostic("attention", "特别关注/模型漏工具已补偿",
                                           "Verified user item=" + turn_input_item_ +

@@ -170,11 +170,19 @@ void LampEdgeRuntime::Process(Work* work) {
             Complete(work, Error("Unsupported expression skill"));
             return;
         }
+        const auto* count = cJSON_GetObjectItem(args.get(), "repetitions");
+        if (count && (skill != "A01" || !cJSON_IsNumber(count) || count->valuedouble < 1 ||
+                      count->valuedouble > 5 || count->valuedouble != count->valueint)) {
+            Complete(work, Error("repetitions accepts integer 1..5 for A01 only"));
+            return;
+        }
+        const int repetitions = count ? count->valueint : 0;
         for (auto* field = args->child; field; field = field->next)
             if (std::string(field->string) != "skill_id" &&
                 std::string(field->string) != "end_mode" &&
                 std::string(field->string) != "speech" && std::string(field->string) != "speak" &&
-                std::string(field->string) != "action") {
+                std::string(field->string) != "action" &&
+                std::string(field->string) != "repetitions") {
                 Complete(work, Error("Expression accepts action or skill_id, speech and end_mode"));
                 return;
             }
@@ -187,6 +195,11 @@ void LampEdgeRuntime::Process(Work* work) {
         args = Parse("{\"steps\":[{\"action_id\":\"execute_primitive\",\"skill_id\":\"" + skill +
                      "\",\"options\":{\"end_mode\":\"" +
                      (end.empty() ? "return_to_reference" : end) + "\"}}]}");
+        if (repetitions)
+            cJSON_AddNumberToObject(
+                cJSON_GetObjectItem(cJSON_GetArrayItem(cJSON_GetObjectItem(args.get(), "steps"), 0),
+                                    "options"),
+                "repetitions", repetitions);
     }
     bool auto_enable = work->name == "lamp_set_mode" || work->name == "lamp_rest";
     if (auto* flag = cJSON_GetObjectItemCaseSensitive(args.get(), "enable_if_needed")) {
@@ -479,7 +492,7 @@ std::string LampEdgeRuntime::Tools() {
         "兴奋A02，好奇B02，同意A01，否定B01，低落A03，强调A16。无需目标或标定，必须已使能，不自动上"
         "力。每轮最多一次。",
         cJSON_Parse(
-            R"({"type":"object","additionalProperties":false,"properties":{"skill_id":{"type":"string","enum":["A01","A02","A03","B01","B02","A16"]},"action":{"type":"string","enum":["点头","兴奋摆动","低头","摇头","好奇歪头","强调","nod","sway","lower_head","shake_head","tilt","emphasize"]},"speak":{"type":"boolean","description":"false只做动作不回复；true或省略伴随说话"},"end_mode":{"type":"string","enum":["return_to_reference","hold_at_end"]}},"oneOf":[{"required":["skill_id"]},{"required":["action"]}]})"));
+            R"({"type":"object","additionalProperties":false,"properties":{"skill_id":{"type":"string","enum":["A01","A02","A03","B01","B02","A16"]},"action":{"type":"string","enum":["点头","兴奋摆动","低头","摇头","好奇歪头","强调","nod","sway","lower_head","shake_head","tilt","emphasize"]},"speak":{"type":"boolean","description":"false只做动作不回复；true或省略伴随说话"},"repetitions":{"type":"integer","minimum":1,"maximum":5,"description":"仅A01点头；一次或两下保持默认2，明确三/四/五次才设置。不拆成多次调用。"},"end_mode":{"type":"string","enum":["return_to_reference","hold_at_end"]}},"oneOf":[{"required":["skill_id"]},{"required":["action"]}]})"));
     auto schema = Json(object(), cJSON_Delete);
     auto* steps = cJSON_CreateObject();
     cJSON_AddStringToObject(steps, "type", "array");

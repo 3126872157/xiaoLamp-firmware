@@ -90,6 +90,7 @@ private:
     double noise_mean_ = 0;
     bool BackgroundQuiet(const std::string& pcm);
     void ObservationWait(const char* reason);
+    unsigned ExplicitNodRepetitions() const;
     std::unique_ptr<WebSocket> socket_;
     std::atomic<bool> ready_{false}, running_{true}, open_{false}, close_{false}, cancel_{false};
     std::atomic<bool> disconnected_{false}, overloaded_{false}, recording_{false};
