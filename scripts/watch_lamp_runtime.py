@@ -15,6 +15,7 @@ def main():
     parser.add_argument('--port', help='Optional ESP diagnostic serial port; no reset')
     parser.add_argument('--seconds', type=int, default=120)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--quiet', action='store_true', help='Write only to file; avoid stdout pipe backpressure during long monitoring')
     args = parser.parse_args()
     if args.seconds < 0: parser.error('seconds must be >= 0 (0 means until Ctrl-C)')
     base = args.url.rstrip('/')
@@ -37,7 +38,8 @@ def main():
                 item['host_time'] = datetime.datetime.now().astimezone().isoformat()
                 line = json.dumps(item, ensure_ascii=False)
                 stream.write(line + '\n'); stream.flush()
-                print(line, flush=True)
+                if not args.quiet:
+                    print(line, flush=True)
             while not args.seconds or time.monotonic() - started < args.seconds:
                 if port:
                     serial_pending += port.read(min(port.in_waiting, 8192))
