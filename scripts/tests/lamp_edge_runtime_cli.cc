@@ -69,7 +69,7 @@ int main() {
     assert(silent_result.find("\"speech\":null") != std::string::npos &&
            silent_result.find("A01") != std::string::npos && executor.groups == 0);
     auto invalid_speech =
-        runtime.Submit("lamp_prepare_expression", R"({"speech":false,"action":"nod"})", 2);
+        runtime.Submit("lamp_prepare_expression", R"({"speech":42,"action":"nod"})", 2);
     runtime.Tick();
     assert(invalid_speech.get().find("speech accepts") != std::string::npos);
     executor.online = executor.armed = false;

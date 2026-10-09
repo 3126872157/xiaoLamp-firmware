@@ -456,6 +456,10 @@ int main() {
             std::promise<std::string> done;
             auto future = done.get_future();
             if (name == "lamp_prepare_expression") {
+                if (args.find("invalid") != std::string::npos) {
+                    done.set_value(R"({"ok":false,"error":"Invalid argument"})");
+                    return future;
+                }
                 ++prepared_count;
                 if (args.find("null") != std::string::npos) {
                     done.set_value(
@@ -476,6 +480,14 @@ int main() {
     expressive.ready_ = true;
     expressive.socket_ = std::make_unique<WebSocket>();
     expressive.Receive(R"({"type":"response.created","response":{"id":"prepare"}})");
+    expressive.Receive(
+        R"({"type":"response.function_call_arguments.done","response_id":"prepare","name":"lamp_express","call_id":"bad-expression","arguments":"{\"skill_id\":\"invalid\"}"})");
+    expressive.Receive(
+        R"({"type":"response.done","response":{"id":"prepare","status":"completed"}})");
+    assert(expressive.expression_used_turn_ == 0);
+    const auto original_turn = expressive.turn_.load();
+    expressive.Receive(R"({"type":"response.created","response":{"id":"prepare"}})");
+    assert(expressive.turn_ == original_turn);
     expressive.Receive(
         R"({"type":"response.function_call_arguments.done","response_id":"prepare","name":"lamp_express","call_id":"expression-1","arguments":"{\"skill_id\":\"B02\"}"})");
     expressive.Receive(

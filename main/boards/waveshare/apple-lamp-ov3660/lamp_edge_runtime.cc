@@ -147,12 +147,23 @@ void LampEdgeRuntime::Process(Work* work) {
                 skill = "A16";
         }
         if (auto* speech = cJSON_GetObjectItem(args.get(), "speech")) {
-            silent_expression = cJSON_IsNull(speech);
+            silent_expression =
+                cJSON_IsNull(speech) || cJSON_IsFalse(speech) ||
+                (cJSON_IsString(speech) && (lamp::Text(args.get(), "speech").empty() ||
+                                            lamp::Text(args.get(), "speech") == "null" ||
+                                            lamp::Text(args.get(), "speech") == "none"));
             if (!silent_expression &&
                 (!cJSON_IsString(speech) || lamp::Text(args.get(), "speech") != "auto")) {
                 Complete(work, Error("speech accepts null or auto"));
                 return;
             }
+        }
+        if (auto* speak = cJSON_GetObjectItem(args.get(), "speak")) {
+            if (!cJSON_IsBool(speak) || cJSON_GetObjectItem(args.get(), "speech")) {
+                Complete(work, Error("speak requires boolean; use speak or speech, not both"));
+                return;
+            }
+            silent_expression = cJSON_IsFalse(speak);
         }
         if (skill != "A01" && skill != "A02" && skill != "A03" && skill != "B01" &&
             skill != "B02" && skill != "A16") {
@@ -162,7 +173,8 @@ void LampEdgeRuntime::Process(Work* work) {
         for (auto* field = args->child; field; field = field->next)
             if (std::string(field->string) != "skill_id" &&
                 std::string(field->string) != "end_mode" &&
-                std::string(field->string) != "speech" && std::string(field->string) != "action") {
+                std::string(field->string) != "speech" && std::string(field->string) != "speak" &&
+                std::string(field->string) != "action") {
                 Complete(work, Error("Expression accepts action or skill_id, speech and end_mode"));
                 return;
             }
@@ -460,14 +472,14 @@ std::string LampEdgeRuntime::Tools() {
         cJSON_Parse(
             R"({"type":"object","additionalProperties":false,"properties":{"target_id":{"type":"string","enum":["user","book"]}},"required":["target_id"]})"));
     add("lamp_express",
-        "纯动作传speech:null与action或skill_"
+        "纯动作传speak:false与action或skill_"
         "id，立即执行且成功不说话；默认伴随说话的表达：先调用预备，再自然回答；实际播放开始后本地释"
         "放动作。不等待运动完成，不用于"
         "单独站起/坐下/工作。开心/"
         "兴奋A02，好奇B02，同意A01，否定B01，低落A03，强调A16。无需目标或标定，必须已使能，不自动上"
         "力。每轮最多一次。",
         cJSON_Parse(
-            R"({"type":"object","additionalProperties":false,"properties":{"skill_id":{"type":"string","enum":["A01","A02","A03","B01","B02","A16"]},"action":{"type":"string","enum":["点头","兴奋摆动","低头","摇头","好奇歪头","强调","nod","sway","lower_head","shake_head","tilt","emphasize"]},"speech":{"anyOf":[{"type":"null"},{"type":"string","enum":["auto"]}],"description":"null只做动作不回复；auto或省略伴随自然说话"},"end_mode":{"type":"string","enum":["return_to_reference","hold_at_end"]}},"oneOf":[{"required":["skill_id"]},{"required":["action"]}]})"));
+            R"({"type":"object","additionalProperties":false,"properties":{"skill_id":{"type":"string","enum":["A01","A02","A03","B01","B02","A16"]},"action":{"type":"string","enum":["点头","兴奋摆动","低头","摇头","好奇歪头","强调","nod","sway","lower_head","shake_head","tilt","emphasize"]},"speak":{"type":"boolean","description":"false只做动作不回复；true或省略伴随说话"},"end_mode":{"type":"string","enum":["return_to_reference","hold_at_end"]}},"oneOf":[{"required":["skill_id"]},{"required":["action"]}]})"));
     auto schema = Json(object(), cJSON_Delete);
     auto* steps = cJSON_CreateObject();
     cJSON_AddStringToObject(steps, "type", "array");
