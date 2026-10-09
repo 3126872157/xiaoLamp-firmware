@@ -68,6 +68,22 @@ int main() {
     }
     producer.join();
     assert(!p.cancel_ && !p.overloaded_ && consumed == 100);
+    // Saturating PCM cannot consume control/cloud slots or terminate the session.
+    for (unsigned i = 0; i < 8; ++i)
+        assert(p.Enqueue(
+            new OmniRealtimeProtocol::Work{std::string(1920, '\0'), false, true, p.epoch_}));
+    assert(
+        !p.Enqueue(new OmniRealtimeProtocol::Work{std::string(1920, '\0'), false, true, p.epoch_}));
+    assert(p.audio_overrun_ && !p.overloaded_);
+    p.SendStartListening(kListeningModeManualStop);
+    assert(p.listen_requested_ == 1 && p.queue_->items.empty());
+    p.socket_ = std::make_unique<WebSocket>();
+    p.ready_ = true;
+    p.RecoverAudioInput();
+    assert(p.audio_recovering_ && !p.close_ && p.ready_ && p.audio_queue_->items.empty());
+    assert(p.socket_->sent.back().find("input_audio_buffer.clear") != std::string::npos);
+    p.ready_ = false;
+    p.audio_recovering_ = false;
     p.socket_ = std::make_unique<WebSocket>();
     unsigned opened = 0, audio = 0, starts = 0, stops = 0, errors = 0, reads = 0;
     p.OnAudioChannelOpened([&] { opened++; });
@@ -353,7 +369,7 @@ int main() {
         assert(observer.socket_->sent.back().find("response.create") != std::string::npos);
         observer.Receive(R"({"type":"response.created","response":{"id":"background"}})");
         observer.observation_text_ =
-            "{\"frame_id\":" + std::to_string(photo->frame_id) + ",\"person\":\"" + person +
+            "{\"frame_id\":" + std::to_string(1) + ",\"person\":\"" + person +
             "\",\"book\":\"unknown\",\"activity\":\"looking\",\"confidence\":0.9,\"summary\":"
             "\"observation\",\"action\":\"" +
             action + "\"}";
@@ -365,6 +381,8 @@ int main() {
         observer.Receive(R"({"type":"session.updated","session":{"modalities":["text","audio"]}})");
     };
     observe("present", "nod");
+    assert(observation_cached_frame == photo->frame_id);
+    assert(Str(Parse(observation_cache).get(), "person") == "present");
     assert(OmniRuntimeState().find("\"observation_fresh\":true") != std::string::npos);
     assert(OmniRuntimeState().find("\"observation\":{") != std::string::npos);
     auto repeated_state = Parse(OmniRuntimeState());

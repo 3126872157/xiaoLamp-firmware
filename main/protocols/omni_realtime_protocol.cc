@@ -254,6 +254,7 @@ std::string OmniPanel(const std::string& request) {
 
 OmniRealtimeProtocol::OmniRealtimeProtocol() {
     queue_ = xQueueCreate(24, sizeof(Work*));
+    audio_queue_ = xQueueCreate(8, sizeof(Work*));
     stopped_ = xSemaphoreCreateBinary();
 }
 OmniRealtimeProtocol::~OmniRealtimeProtocol() {
@@ -263,13 +264,17 @@ OmniRealtimeProtocol::~OmniRealtimeProtocol() {
     Work* w;
     while (queue_ && xQueueReceive(queue_, &w, 0) == pdTRUE)
         delete w;
+    while (audio_queue_ && xQueueReceive(audio_queue_, &w, 0) == pdTRUE)
+        delete w;
+    if (audio_queue_)
+        vQueueDelete(audio_queue_);
     if (queue_)
         vQueueDelete(queue_);
     if (stopped_)
         vSemaphoreDelete(stopped_);
 }
 bool OmniRealtimeProtocol::Start() {
-    if (!queue_ || !stopped_) {
+    if (!queue_ || !audio_queue_ || !stopped_) {
         SetError("Cannot allocate Omni worker");
         return false;
     }
@@ -284,6 +289,13 @@ bool OmniRealtimeProtocol::Start() {
     return true;
 }
 bool OmniRealtimeProtocol::Enqueue(Work* w) {
+    if (w->audio) {
+        if (running_ && audio_queue_ && xQueueSend(audio_queue_, &w, 0) == pdTRUE)
+            return true;
+        delete w;
+        audio_overrun_ = true;
+        return false;
+    }
     if (w->incoming && queue_) {
         // Bound memory and let TCP apply backpressure instead of cancelling a normal burst.
         while (running_ && w->epoch == epoch_ && !close_ && !cancel_) {
@@ -341,7 +353,7 @@ bool OmniRealtimeProtocol::SendText(const std::string& s) {
     return Enqueue(new Work{s, false, false, epoch_});
 }
 bool OmniRealtimeProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> p) {
-    if (!ready_ || (!recording_ && observation_phase_ == ObservationPhase::Idle) || rest_requested_)
+    if (!ready_ || (!recording_ && !audio_recovering_) || rest_requested_)
         return true;
     if (!p->pcm16 || p->sample_rate != 16000 || p->payload.empty() || p->payload.size() > 8192)
         return false;
@@ -351,11 +363,11 @@ bool OmniRealtimeProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> p) {
                  true, epoch_});
 }
 void OmniRealtimeProtocol::SendStartListening(ListeningMode mode) {
-    SendText(mode == kListeningModeManualStop ? "@manual" : "@vad");
+    listen_requested_ = mode == kListeningModeManualStop ? 1 : 2;
 }
 void OmniRealtimeProtocol::SendStopListening() {
     recording_ = false;
-    SendText("@finish");
+    finish_requested_ = true;
 }
 void OmniRealtimeProtocol::SendAbortSpeaking(AbortReason reason) {
     {
@@ -558,6 +570,11 @@ void OmniRealtimeProtocol::Disconnect(bool notify) {
     Work* stale = nullptr;
     while (queue_ && xQueueReceive(queue_, &stale, 0) == pdTRUE)
         delete stale;
+    while (audio_queue_ && xQueueReceive(audio_queue_, &stale, 0) == pdTRUE)
+        delete stale;
+    audio_overrun_ = audio_recovering_ = false;
+    listen_requested_ = 0;
+    finish_requested_ = false;
     close_ = false;
     response_.clear();
     cancelled_response_.clear();
@@ -620,7 +637,12 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
         auto code = Str(cJSON_GetObjectItem(j.get(), "error"), "code");
         if (code == "response_cancel_not_active")
             return;
-        Fail("Omni API rejected an event: inspect credentials/session format/quota");
+        const auto param = Str(cJSON_GetObjectItem(j.get(), "error"), "param");
+        Board::GetInstance().RecordDiagnostic("omni_api_error", code.substr(0, 96),
+                                              param.substr(0, 96));
+        const auto message = "Omni API rejected event: code=" + code.substr(0, 96) +
+                             "; param=" + param.substr(0, 96);
+        Fail(message.c_str());
     } else if (type == "input_audio_buffer.committed" && manual_) {
         Write(R"({"type":"response.create"})");
     } else if (type == "response.created") {
@@ -1241,7 +1263,8 @@ void OmniRealtimeProtocol::PollObservation() {
         unsigned change = 0;
         for (size_t i = 0; i < 192; i++)
             change += std::abs(int(frame->luminance[i]) - int(observed_luminance_[i]) - mean);
-        if (change / 192 < 12) {
+        if (change / 192 < 12 && observation_at &&
+            now - observation_at < int64_t(interval) * 2000000) {
             observed_frame_ = frame->frame_id;
             return;
         }
@@ -1414,22 +1437,28 @@ bool OmniRealtimeProtocol::ObservationEvent(const cJSON* j, const std::string& t
         }
         const auto result_age =
             observation_frame_ ? esp_timer_get_time() - observation_frame_->captured_at_us : -1;
-        const bool valid =
-            result_age >= 0 && result_age <= int64_t(interval) * 2000000 &&
-            (!validate || (observation_frame_ && validate(*observation_frame_))) &&
-            Str(response, "status") == "completed" && cJSON_IsObject(observed.get()) &&
-            cJSON_IsNumber(id) && observation_frame_ &&
-            id->valuedouble == double(observation_frame_->frame_id) && cJSON_IsNumber(confidence) &&
-            confidence->valuedouble >= 0 && confidence->valuedouble <= 1 &&
-            (person == "present" || person == "absent" || person == "unknown") &&
-            (book == "present" || book == "absent" || book == "unknown") &&
-            (activity == "reading" || activity == "looking" || activity == "away" ||
-             activity == "unknown") &&
-            cJSON_IsString(cJSON_GetObjectItem(observed.get(), "summary")) &&
-            Str(observed.get(), "summary").size() <= 640 &&
-            (action == "none" || action == "nod" || action == "tilt" || action == "gaze_user" ||
-             action == "gaze_book");
+        const bool valid = result_age >= 0 && result_age <= int64_t(interval) * 2000000 &&
+                           (!validate || (observation_frame_ && validate(*observation_frame_))) &&
+                           Str(response, "status") == "completed" &&
+                           cJSON_IsObject(observed.get()) && cJSON_IsNumber(id) &&
+                           observation_frame_ && cJSON_IsNumber(confidence) &&
+                           confidence->valuedouble >= 0 && confidence->valuedouble <= 1 &&
+                           (person == "present" || person == "absent" || person == "unknown") &&
+                           (book == "present" || book == "absent" || book == "unknown") &&
+                           (activity == "reading" || activity == "looking" || activity == "away" ||
+                            activity == "unknown") &&
+                           cJSON_IsString(cJSON_GetObjectItem(observed.get(), "summary")) &&
+                           Str(observed.get(), "summary").size() <= 640 &&
+                           (action == "none" || action == "nod" || action == "tilt" ||
+                            action == "gaze_user" || action == "gaze_book");
         if (valid) {
+            if (id->valuedouble != double(observation_frame_->frame_id))
+                Board::GetInstance().RecordDiagnostic(
+                    "observation_frame_normalized", "response_bound",
+                    "local=" + std::to_string(observation_frame_->frame_id) +
+                        "; model=" + std::to_string(id->valuedouble));
+            cJSON_SetNumberValue(cJSON_GetObjectItem(observed.get(), "frame_id"),
+                                 double(observation_frame_->frame_id));
             observation_attempts_ = 0;
             bool actions = false;
             {
@@ -1499,8 +1528,30 @@ bool OmniRealtimeProtocol::ObservationEvent(const cJSON* j, const std::string& t
     }
     return type.starts_with("response.");
 }
+void OmniRealtimeProtocol::RecoverAudioInput() {
+    if (!audio_overrun_.exchange(false))
+        return;
+    audio_recovering_ = true;
+    recovery_quiet_since_ = 0;
+    Work* stale = nullptr;
+    while (audio_queue_ && xQueueReceive(audio_queue_, &stale, 0) == pdTRUE)
+        delete stale;
+    if (ready_) {
+        if (observation_phase_ != ObservationPhase::Idle &&
+            observation_phase_ != ObservationPhase::Restore)
+            RestoreForeground("audio_input_overrun");
+        else
+            Write(R"({"type":"input_audio_buffer.clear"})");
+    }
+    sample_sent_ = false;
+    had_audio_ = false;
+    Board::GetInstance().RecordDiagnostic(
+        "audio_input_overrun", "utterance_rejected",
+        "Input buffer full; discard incomplete input until 600ms quiet; connection preserved");
+}
 void OmniRealtimeProtocol::Run() {
     while (running_) {
+        RecoverAudioInput();
         PollExpression();
         PollObservation();
         if (awaiting_tools_ && ready_ && !close_ && !cancel_)
@@ -1535,8 +1586,15 @@ void OmniRealtimeProtocol::Run() {
             Board::GetInstance().RecordDiagnostic("voice_cancel", "omni", reason);
         }
         Work* raw = nullptr;
-        if (xQueueReceive(queue_, &raw, pdMS_TO_TICKS(20)) != pdTRUE)
-            continue;
+        if (xQueueReceive(queue_, &raw, 0) != pdTRUE) {
+            const auto listen = listen_requested_.exchange(0);
+            if (listen)
+                raw = new Work{listen == 1 ? "@manual" : "@vad", false, false, epoch_};
+            else if (finish_requested_.exchange(false))
+                raw = new Work{"@finish", false, false, epoch_};
+            else if (xQueueReceive(audio_queue_, &raw, pdMS_TO_TICKS(20)) != pdTRUE)
+                continue;
+        }
         std::unique_ptr<Work> w(raw);
         if (w->epoch != epoch_)
             continue;
@@ -1548,6 +1606,21 @@ void OmniRealtimeProtocol::Run() {
             continue;
         if (w->audio) {
             const bool quiet = QuietPacket(w->text);
+            if (audio_recovering_) {
+                const auto now = esp_timer_get_time();
+                if (!quiet)
+                    recovery_quiet_since_ = 0;
+                else if (!recovery_quiet_since_)
+                    recovery_quiet_since_ = now;
+                else if (now - recovery_quiet_since_ >= 600000) {
+                    audio_recovering_ = false;
+                    Board::GetInstance().RecordDiagnostic("audio_input_recovered", "quiet",
+                                                          "Next complete utterance accepted");
+                }
+                continue;
+            }
+            if (!recording_)
+                continue;
             if (!quiet) {
                 quiet_since_ = esp_timer_get_time();
                 if (observation_phase_ == ObservationPhase::Restore)

@@ -66,7 +66,12 @@ private:
         bool audio = false;
         uint32_t epoch = 0;
     };
-    QueueHandle_t queue_ = nullptr;
+    QueueHandle_t queue_ = nullptr, audio_queue_ = nullptr;
+    std::atomic<bool> audio_overrun_{false}, audio_recovering_{false};
+    std::atomic<int> listen_requested_{0};
+    std::atomic<bool> finish_requested_{false};
+    int64_t recovery_quiet_since_ = 0;
+    void RecoverAudioInput();
     SemaphoreHandle_t stopped_ = nullptr;
     bool task_started_ = false;
     std::unique_ptr<WebSocket> socket_;
