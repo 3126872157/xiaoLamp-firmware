@@ -429,6 +429,81 @@ int main() {
     assert(!companion_enabled && observation_status == "paused_after_two_failures");
     observer.Disconnect(false);
     assert(!companion_enabled && observation_cache.empty());
+    // Voice expression uses production parameter events + asynchronous preparation.
+    unsigned prepared_count = 0, released_count = 0;
+    hardware_state =
+        R"({"mode":"stand","available":true,"motion_enabled":true,"torque_enabled_confirmed":true})";
+    OmniSetRuntime(
+        [&](const std::string& name, const std::string& args, uint64_t) {
+            std::promise<std::string> done;
+            auto future = done.get_future();
+            if (name == "lamp_prepare_expression") {
+                ++prepared_count;
+                if (args.find("null") != std::string::npos) {
+                    done.set_value(
+                        R"({"ok":true,"status":"prepared","speech":null,"args":{"steps":[{"action_id":"execute_primitive","skill_id":"A01"}]}})");
+                    return future;
+                }
+                done.set_value(
+                    R"({"ok":true,"status":"prepared","args":{"steps":[{"action_id":"execute_primitive","skill_id":"B02"}]}})");
+            } else {
+                assert(name == "lamp_run_sequence");
+                ++released_count;
+                done.set_value(R"({"ok":true,"result":{"status":"completed"}})");
+            }
+            return future;
+        },
+        [](uint64_t) {}, "[]");
+    OmniRealtimeProtocol expressive;
+    expressive.ready_ = true;
+    expressive.socket_ = std::make_unique<WebSocket>();
+    expressive.Receive(R"({"type":"response.created","response":{"id":"prepare"}})");
+    expressive.Receive(
+        R"({"type":"response.function_call_arguments.done","response_id":"prepare","name":"lamp_express","call_id":"expression-1","arguments":"{\"skill_id\":\"B02\"}"})");
+    expressive.Receive(
+        R"({"type":"response.done","response":{"id":"prepare","status":"completed"}})");
+    assert(prepared_count == 1 && released_count == 0 && !expressive.expression_.args.empty());
+    expressive.Receive(R"({"type":"response.created","response":{"id":"speech"}})");
+    expressive.PollExpression();
+    assert(released_count == 0);  // Receiving/creating speech is not playback.
+    expressive.OnPlaybackStarted(expressive.playback_ + 1);
+    expressive.PollExpression();
+    assert(released_count == 0);  // Stale/foreign playback cannot release.
+    expressive.OnPlaybackStarted(expressive.playback_);
+    expressive.PollExpression();
+    expressive.PollExpression();
+    assert(released_count == 1);
+    expressive.PollExpression();
+    assert(released_count == 1);  // Once only.
+    expressive.expression_ = {"{\"steps\":[]}", "stand", expressive.turn_, expressive.playback_,
+                              omni_test_time + 10000000};
+    hardware_state =
+        R"({"mode":"stand","available":true,"motion_enabled":true,"torque_enabled_confirmed":true,"manual_control":true})";
+    expressive.PollExpression();
+    assert(expressive.expression_.args.empty() && released_count == 1);
+    expressive.expression_.args = "{}";
+    expressive.SendAbortSpeaking(kAbortReasonNone);
+    expressive.PollExpression();
+    assert(expressive.expression_.args.empty() && released_count == 1);
+    expressive.Disconnect(false);
+    hardware_state =
+        R"({"mode":"stand","available":true,"motion_enabled":true,"torque_enabled_confirmed":true})";
+    OmniRealtimeProtocol silent;
+    silent.ready_ = true;
+    silent.socket_ = std::make_unique<WebSocket>();
+    silent.Receive(R"({"type":"response.created","response":{"id":"silent"}})");
+    silent.Receive(
+        R"({"type":"response.function_call_arguments.done","response_id":"silent","name":"lamp_express","call_id":"silent-1","arguments":"{\"speech\":null,\"action\":\"nod\"}"})");
+    const auto before = silent.socket_->sent.size();
+    silent.Receive(R"({"type":"response.done","response":{"id":"silent","status":"completed"}})");
+    assert(silent.expression_.silent && !silent.continuing_);
+    for (size_t i = before; i < silent.socket_->sent.size(); ++i)
+        assert(silent.socket_->sent[i].find("response.create") == std::string::npos);
+    silent.PollExpression();
+    assert(released_count == 2 && silent.expression_.args.empty());
+    silent.PollExpression();
+    assert(released_count == 2);
+    silent.Disconnect(false);
     OmniSetRuntime({}, {}, "");
     OmniSetStateReader({});
     OmniSetVision({});

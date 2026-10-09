@@ -91,8 +91,15 @@ void Application::Initialize() {
     callbacks.on_playback_drained = [this]() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_PLAYBACK_DRAINED);
     };
-    callbacks.on_playback_progress = [this](uint32_t playback_id, uint32_t media_position_ms) {
+    auto last_playback = std::make_shared<std::atomic<uint32_t>>(0);
+    callbacks.on_playback_progress = [this, last_playback](uint32_t playback_id,
+                                                           uint32_t media_position_ms) {
         notify_player_.OnPlaybackProgress(playback_id, media_position_ms);
+        if (playback_id && last_playback->exchange(playback_id) != playback_id)
+            Schedule([this, playback_id] {
+                if (protocol_ && protocol_->AcceptsPlayback(playback_id))
+                    protocol_->OnPlaybackStarted(playback_id);
+            });
     };
     audio_service_.SetCallbacks(callbacks);
 

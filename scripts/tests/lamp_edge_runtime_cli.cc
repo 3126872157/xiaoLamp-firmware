@@ -12,6 +12,7 @@ struct Executor : LampActionExecutor {
         return "{\"available\":" + std::string(online ? "true" : "false") +
                ",\"mode\":\"stand\",\"busy\":false,\"motion_enabled\":" +
                std::string(armed ? "true" : "false") +
+               ",\"torque_enabled_confirmed\":" + std::string(armed ? "true" : "false") +
                ",\"manual_control\":" + std::string(manual ? "true" : "false") + "}";
     }
     std::string Inspect(const std::string&) override { return "{}"; }
@@ -49,6 +50,29 @@ int main() {
     assert(state.find("\"available\":false") != std::string::npos);
     assert(state.find("\"confirmed_mode\":\"unknown\"") != std::string::npos);
     assert(state.find("runtime_ready") != std::string::npos);
+    auto no_prepare = runtime.Submit("lamp_prepare_expression", R"({"skill_id":"B02"})", 2);
+    runtime.Tick();
+    assert(no_prepare.get().find("no automatic enable") != std::string::npos &&
+           executor.groups == 0);
+    executor.online = executor.armed = true;
+    auto prepared = runtime.Submit("lamp_prepare_expression", R"({"skill_id":"A02"})", 2);
+    runtime.Tick();
+    const auto preflight = prepared.get();
+    assert(preflight.find("prepared") != std::string::npos && executor.groups == 0);
+    auto bad_prepare = runtime.Submit("lamp_prepare_expression",
+                                      R"({"skill_id":"A13","enable_if_needed":true})", 2);
+    runtime.Tick();
+    assert(bad_prepare.get().find("Unsupported") != std::string::npos && executor.groups == 0);
+    auto silent = runtime.Submit("lamp_prepare_expression", R"({"speech":null,"action":"nod"})", 2);
+    runtime.Tick();
+    auto silent_result = silent.get();
+    assert(silent_result.find("\"speech\":null") != std::string::npos &&
+           silent_result.find("A01") != std::string::npos && executor.groups == 0);
+    auto invalid_speech =
+        runtime.Submit("lamp_prepare_expression", R"({"speech":false,"action":"nod"})", 2);
+    runtime.Tick();
+    assert(invalid_speech.get().find("speech accepts") != std::string::npos);
+    executor.online = executor.armed = false;
     const std::string group =
         R"({"steps":[{"action_id":"adjust_pose","direction":"yaw_positive","size":"small"}]})";
     auto disabled = runtime.Submit("lamp_run_sequence", group, 1);
@@ -157,7 +181,7 @@ int main() {
     for (auto& f : full)
         assert(f.get().find("runtime") != std::string::npos);
     auto schemas = CJsonUniquePtr(cJSON_Parse(LampEdgeRuntime::Tools().c_str()));
-    assert(cJSON_IsArray(schemas.get()) && cJSON_GetArraySize(schemas.get()) == 9);
+    assert(cJSON_IsArray(schemas.get()) && cJSON_GetArraySize(schemas.get()) == 10);
     assert(LampEdgeRuntime::Tools().find("A10") == std::string::npos);
     std::cout << "PASS runtime: semantic bounds, ownership, disarmed rejection, one group, "
                  "cancellation, feedback, emergency reserve and catalog\n";

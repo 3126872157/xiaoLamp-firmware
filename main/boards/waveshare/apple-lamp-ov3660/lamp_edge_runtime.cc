@@ -46,7 +46,7 @@ bool Emergency(const std::string& name, const std::string& args) {
             cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(j.get(), "enabled")));
 }
 std::string Operation(const std::string& name) {
-    if (name == "lamp_run_sequence" || name == "lamp_set_mode")
+    if (name == "lamp_run_sequence" || name == "lamp_set_mode" || name == "lamp_prepare_expression")
         return "execute_group";
     if (name == "lamp_stop")
         return "cancel";
@@ -123,6 +123,59 @@ void LampEdgeRuntime::Process(Work* work) {
         Complete(work, Error("Unknown tool/invalid args; runtime owns context"));
         return;
     }
+    const bool prepare_expression = work->name == "lamp_prepare_expression";
+    bool silent_expression = false;
+    if (prepare_expression) {
+        auto skill = lamp::Text(args.get(), "skill_id");
+        if (auto* action = cJSON_GetObjectItem(args.get(), "action")) {
+            if (!cJSON_IsString(action) || cJSON_GetObjectItem(args.get(), "skill_id")) {
+                Complete(work, Error("Use exactly one action or skill_id"));
+                return;
+            }
+            const auto name = lamp::Text(args.get(), "action");
+            if (name == "点头" || name == "nod")
+                skill = "A01";
+            else if (name == "兴奋摆动" || name == "sway")
+                skill = "A02";
+            else if (name == "低头" || name == "lower_head")
+                skill = "A03";
+            else if (name == "摇头" || name == "shake_head")
+                skill = "B01";
+            else if (name == "好奇歪头" || name == "tilt")
+                skill = "B02";
+            else if (name == "强调" || name == "emphasize")
+                skill = "A16";
+        }
+        if (auto* speech = cJSON_GetObjectItem(args.get(), "speech")) {
+            silent_expression = cJSON_IsNull(speech);
+            if (!silent_expression &&
+                (!cJSON_IsString(speech) || lamp::Text(args.get(), "speech") != "auto")) {
+                Complete(work, Error("speech accepts null or auto"));
+                return;
+            }
+        }
+        if (skill != "A01" && skill != "A02" && skill != "A03" && skill != "B01" &&
+            skill != "B02" && skill != "A16") {
+            Complete(work, Error("Unsupported expression skill"));
+            return;
+        }
+        for (auto* field = args->child; field; field = field->next)
+            if (std::string(field->string) != "skill_id" &&
+                std::string(field->string) != "end_mode" &&
+                std::string(field->string) != "speech" && std::string(field->string) != "action") {
+                Complete(work, Error("Expression accepts action or skill_id, speech and end_mode"));
+                return;
+            }
+        const auto end = lamp::Text(args.get(), "end_mode");
+        if (cJSON_GetObjectItem(args.get(), "end_mode") && end != "return_to_reference" &&
+            end != "hold_at_end") {
+            Complete(work, Error("Invalid expression end_mode"));
+            return;
+        }
+        args = Parse("{\"steps\":[{\"action_id\":\"execute_primitive\",\"skill_id\":\"" + skill +
+                     "\",\"options\":{\"end_mode\":\"" +
+                     (end.empty() ? "return_to_reference" : end) + "\"}}]}");
+    }
     bool auto_enable = work->name == "lamp_set_mode" || work->name == "lamp_rest";
     if (auto* flag = cJSON_GetObjectItemCaseSensitive(args.get(), "enable_if_needed")) {
         if (operation != "execute_group" || !cJSON_IsBool(flag)) {
@@ -185,6 +238,31 @@ void LampEdgeRuntime::Process(Work* work) {
     }
     if (operation == "execute_group" && group_turn_ == work->turn) {
         Complete(work, Error("Only one motion group per turn"));
+        return;
+    }
+    if (prepare_expression) {
+        auto state = Parse(executor_.State());
+        if (!cJSON_IsTrue(cJSON_GetObjectItem(state.get(), "available")) ||
+            !cJSON_IsTrue(cJSON_GetObjectItem(state.get(), "motion_enabled")) ||
+            !cJSON_IsTrue(cJSON_GetObjectItem(state.get(), "torque_enabled_confirmed")) ||
+            cJSON_IsTrue(cJSON_GetObjectItem(state.get(), "busy")) ||
+            cJSON_IsTrue(cJSON_GetObjectItem(state.get(), "manual_control"))) {
+            Complete(work, Error("Expression requires enabled fresh hardware and free control; no "
+                                 "automatic enable"));
+            return;
+        }
+        auto receipt = Parse(
+            R"({"ok":true,"status":"prepared","execution_completed":false,"instruction":"Only prepared; speak naturally now. Local playback releases the action; never claim completed."})");
+        cJSON_AddItemToObject(receipt.get(), "speech",
+                              silent_expression ? cJSON_CreateNull() : cJSON_CreateString("auto"));
+        if (silent_expression) {
+            cJSON_DeleteItemFromObject(receipt.get(), "instruction");
+            cJSON_AddStringToObject(receipt.get(), "instruction",
+                                    "Silent action: local dispatch immediately; do not create a "
+                                    "spoken success reply. Failures may be reported.");
+        }
+        cJSON_AddItemToObject(receipt.get(), "args", cJSON_Duplicate(args.get(), true));
+        Complete(work, lamp::Encode(receipt.get()));
         return;
     }
     // Explicit mode/rest requests, or an explicit motion-intent flag, authorize enable.
@@ -329,7 +407,7 @@ std::string LampEdgeRuntime::State() {
                             snapshot_at ? (esp_timer_get_time() - snapshot_at) / 1000 : -1);
     cJSON_AddBoolToObject(runtime, "runtime_ready", started_);
     // Observation state belongs to the Omni connection and is merged at its API boundary.
-    cJSON_AddBoolToObject(runtime, "speech_motion_sync", false);
+    cJSON_AddBoolToObject(runtime, "speech_motion_sync", true);
     cJSON_AddNumberToObject(runtime, "queued_bytes", queued_bytes_);
     return lamp::Encode(j.get());
 }
@@ -381,6 +459,15 @@ std::string LampEdgeRuntime::Tools() {
     add("lamp_record_calibration", "用户已手摆对准并明确说记录时保存当前模式的完整回读姿态。",
         cJSON_Parse(
             R"({"type":"object","additionalProperties":false,"properties":{"target_id":{"type":"string","enum":["user","book"]}},"required":["target_id"]})"));
+    add("lamp_express",
+        "纯动作传speech:null与action或skill_"
+        "id，立即执行且成功不说话；默认伴随说话的表达：先调用预备，再自然回答；实际播放开始后本地释"
+        "放动作。不等待运动完成，不用于"
+        "单独站起/坐下/工作。开心/"
+        "兴奋A02，好奇B02，同意A01，否定B01，低落A03，强调A16。无需目标或标定，必须已使能，不自动上"
+        "力。每轮最多一次。",
+        cJSON_Parse(
+            R"({"type":"object","additionalProperties":false,"properties":{"skill_id":{"type":"string","enum":["A01","A02","A03","B01","B02","A16"]},"action":{"type":"string","enum":["点头","兴奋摆动","低头","摇头","好奇歪头","强调","nod","sway","lower_head","shake_head","tilt","emphasize"]},"speech":{"anyOf":[{"type":"null"},{"type":"string","enum":["auto"]}],"description":"null只做动作不回复；auto或省略伴随自然说话"},"end_mode":{"type":"string","enum":["return_to_reference","hold_at_end"]}},"oneOf":[{"required":["skill_id"]},{"required":["action"]}]})"));
     auto schema = Json(object(), cJSON_Delete);
     auto* steps = cJSON_CreateObject();
     cJSON_AddStringToObject(steps, "type", "array");
@@ -437,7 +524,8 @@ std::string LampEdgeRuntime::Tools() {
     cJSON_AddItemToObject(schema.get(), "required", cJSON_Parse("[\"steps\"]"));
     add("lamp_run_sequence",
         "执行一个有限语义动作组。次数幅度用本地默认，点两下头只用一次A01。靠近用A13而非低头，缺标定"
-        "不替代。set_mode保持yaw。受理后可正常回答，不声称已完成。当前尚未支持伴随语音预备释放。",
+        "不替代。set_mode保持yaw。受理后可正常回答，不声称已完成。若要边说边表达请用lamp_"
+        "express，不在这里串行等待表达。",
         schema.release());
     return lamp::Encode(tools.get());
 }

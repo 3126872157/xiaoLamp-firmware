@@ -47,6 +47,8 @@ public:
     void ReportPlaybackFailure(const std::string& message) override { Fail(message.c_str()); }
     bool WantsConversationEnd() const override { return rest_requested_; }
     void OnPlaybackDrained() override;
+    void OnPlaybackStarted(uint32_t id) override { output_started_ = id; }
+
     bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) override;
     void SendStartListening(ListeningMode mode) override;
     void SendStopListening() override;
@@ -87,6 +89,22 @@ private:
     std::atomic<uint64_t> turn_{0};
     bool continuing_ = false, awaiting_tools_ = false;
     unsigned tool_rounds_ = 0;
+    struct PreparedExpression {
+        std::string args, mode;
+        uint64_t turn = 0;
+        uint32_t playback = 0;
+        int64_t deadline = 0;
+        bool silent = false;
+    } expression_;
+    std::atomic<uint32_t> output_started_{0};
+    std::atomic<bool> output_drained_{true};
+    uint64_t expression_used_turn_ = 0;
+    int64_t expression_last_release_ = 0, expression_poll_at_ = 0;
+    std::future<std::string> expression_result_;
+    std::string expression_task_, expression_failure_;
+    uint64_t expression_motion_turn_ = 0;
+    bool failure_notification_ = false;
+    void PollExpression();
     void CompleteTools();
     bool AppendImage();
     enum class ObservationPhase { Idle, Configure, Sample, Model, Restore };

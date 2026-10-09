@@ -64,6 +64,7 @@ public:
     virtual void ReportPlaybackFailure(const std::string&) { CloseAudioChannel(); }
     virtual bool WantsConversationEnd() const { return false; }
     virtual void OnPlaybackDrained() {}
+    virtual void OnPlaybackStarted(uint32_t) {}
     virtual bool OpenAudioChannel() = 0;
     virtual void CloseAudioChannel(bool send_goodbye = true) = 0;
     virtual bool IsAudioChannelOpened() const = 0;
