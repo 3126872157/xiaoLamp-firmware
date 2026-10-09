@@ -502,7 +502,27 @@ Plan Build(const Configuration& config, int mode, const Pose& current, const cJS
         if (!checked)
             throw std::runtime_error(checked.error());
         const auto action = Text(step, "action_id"), skill = Text(step, "skill_id");
-        const auto& profile = config.modes[mode];
+        auto profile = config.modes[mode];
+        const bool relative_expression = action == "execute_primitive" &&
+                                         (skill == "A01" || skill == "A02" || skill == "A03" ||
+                                          skill == "A16" || skill == "B01" || skill == "B02") &&
+                                         Text(step, "target_id").empty();
+        if (relative_expression) {
+            // A posture label is not a hardware limit. Keep body envelopes but admit the
+            // actual measured baseline (including installation/settling differences).
+            // Wrist/yaw expressions use URDF travel + geometry, not a mandatory Home gate.
+            for (int j = 0; j < 5; ++j) {
+                if (j == 0 || j == 3 || j == 4)
+                    profile.ranges[j] = {kJoints[j].lower - profile.home[j],
+                                         kJoints[j].upper - profile.home[j]};
+                else {
+                    profile.ranges[j].min =
+                        std::min(profile.ranges[j].min, current[j] - profile.home[j] - 5 * kDeg);
+                    profile.ranges[j].max =
+                        std::max(profile.ranges[j].max, current[j] - profile.home[j] + 5 * kDeg);
+                }
+            }
+        }
         auto route = [&](Pose target, int after, double duration, bool mode_only) {
             std::vector<std::vector<Pose>> routes = {{target}};
             if (!mode_only) {

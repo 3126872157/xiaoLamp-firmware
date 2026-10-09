@@ -67,6 +67,16 @@ class LampPoseTests(unittest.TestCase):
             decoded = (ticks[i]-500)*.24*math.pi/180*sign
             self.assertGreaterEqual(decoded, joint['lower']); self.assertLessEqual(decoded, joint['upper'])
 
+    def test_relative_nod_accepts_safe_measured_baseline_without_home_guard(self):
+        q = dict(self.config['homes']['homes']['stand']['pose'], baseYaw=.7)
+        plan = self.run_plan(operation='plan', mode='sit', pose=q,
+            step={'action_id':'execute_primitive','skill_id':'A01','options':{'end_mode':'return_to_reference'}}, times=[.7, 1, 2])
+        self.assertTrue(plan['ok'], plan)
+        self.assertGreater(max(abs(s['pose']['wrist']-q['wrist']) for s in plan['samples']), .03)
+        invalid = dict(q, wrist=3)
+        self.assertFalse(self.run_plan(operation='plan', mode='stand', pose=invalid,
+            step={'action_id':'execute_primitive','skill_id':'A01'})['ok'])
+
     def test_stale_target_and_raw_angles_are_not_silently_accepted(self):
         q = self.config['homes']['homes']['stand']['pose']
         plan = self.run_plan(operation='plan', mode='stand', pose=q,
