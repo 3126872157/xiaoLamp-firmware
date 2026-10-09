@@ -38,11 +38,19 @@ public:
                             }
                             if (due) {
                                 CJsonUniquePtr state(cJSON_Parse(self->executor_.State().c_str()));
-                                if (!cJSON_IsTrue(cJSON_GetObjectItem(state.get(), "busy")) &&
-                                    !cJSON_IsTrue(
-                                        cJSON_GetObjectItem(state.get(), "manual_control")) &&
-                                    heap_caps_get_free_size(MALLOC_CAP_INTERNAL) > 45000)
+                                if (cJSON_IsTrue(cJSON_GetObjectItem(state.get(), "busy")) ||
+                                    cJSON_IsTrue(
+                                        cJSON_GetObjectItem(state.get(), "manual_control")))
+                                    self->CaptureWait("hardware_busy_or_manual");
+                                else if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < 24576 ||
+                                         heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) <
+                                             8192 ||
+                                         heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < 131072)
+                                    self->CaptureWait("memory_reserve");
+                                else {
+                                    self->CaptureWait("eligible");
                                     self->Request();
+                                }
                             }
                         }
                     }
@@ -77,6 +85,9 @@ public:
         cJSON_AddNumberToObject(j.get(), "max_jpeg_bytes", 65536);
         cJSON_AddBoolToObject(j.get(), "periodic_observation", periodic_);
         cJSON_AddNumberToObject(j.get(), "interval_s", interval_s_);
+        cJSON_AddStringToObject(j.get(), "capture_wait_reason", capture_wait_reason_.c_str());
+        cJSON_AddNumberToObject(j.get(), "required_internal_free_bytes", 24576);
+        cJSON_AddNumberToObject(j.get(), "required_internal_largest_block", 8192);
         cJSON_AddNumberToObject(j.get(), "capture_duration_ms", duration_ms_);
         cJSON_AddNumberToObject(j.get(), "capture_min_internal_bytes", capture_min_internal_);
         cJSON_AddNumberToObject(j.get(), "internal_free_bytes",
@@ -101,6 +112,15 @@ public:
     }
 
 private:
+    void CaptureWait(const char* reason) {
+        {
+            std::lock_guard lock(mutex_);
+            if (capture_wait_reason_ == reason)
+                return;
+            capture_wait_reason_ = reason;
+        }
+        executor_.RecordDiagnostic("camera_wait", reason, "Capture budget/control gate");
+    }
     Camera* camera_;
     LampHardwareExecutor& executor_;
     SemaphoreHandle_t signal_ = nullptr;
@@ -109,6 +129,7 @@ private:
     std::mutex mutex_;
     std::shared_ptr<const OmniImage> frame_;
     std::string error_;
+    std::string capture_wait_reason_;
     int64_t requested_at_ = 0, duration_ms_ = 0;
     int64_t capture_min_internal_ = -1;
     uint64_t sequence_ = 0;
