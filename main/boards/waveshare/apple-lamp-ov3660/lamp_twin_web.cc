@@ -10,12 +10,18 @@
 #include "lamp_twin_web.h"
 #if CONFIG_APPLE_LAMP_OMNI_REALTIME
 #include "lamp_omni_page.h"
+#if CONFIG_APPLE_LAMP_EDGE_RUNTIME
+#include "lamp_vision.h"
+#endif
 #include "omni_realtime_protocol.h"
 #endif
 namespace {
 httpd_handle_t server = nullptr;
 LampHardwareExecutor* device = nullptr;
 std::string secret;
+#if CONFIG_APPLE_LAMP_EDGE_RUNTIME
+LampVision* vision = nullptr;
+#endif
 std::string Header(httpd_req_t* req, const char* name) {
     const auto size = httpd_req_get_hdr_value_len(req, name);
     if (!size || size > 200)
@@ -42,7 +48,7 @@ esp_err_t Page(httpd_req_t* req) {
     httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
     httpd_resp_set_hdr(req, "Content-Security-Policy",
                        "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-                       "frame-ancestors 'none'; connect-src 'self'");
+                       "frame-ancestors 'none'; connect-src 'self'; img-src 'self' blob:");
     return httpd_resp_send(req, page.data(), page.size());
 }
 esp_err_t Api(httpd_req_t* req) {
@@ -64,6 +70,19 @@ esp_err_t Api(httpd_req_t* req) {
         if (path == "/api/lamp/omni")
             return Json(req, OmniPanel());
 #if CONFIG_APPLE_LAMP_EDGE_RUNTIME
+        if (path == "/api/lamp/vision")
+            return Json(req, vision ? vision->State() : "{}");
+        if (path == "/api/lamp/vision/jpeg") {
+            auto frame = vision ? vision->Latest() : nullptr;
+            if (!frame) {
+                httpd_resp_set_status(req, "404 Not Found");
+                return Json(req, "{\"ok\":false}");
+            }
+            httpd_resp_set_type(req, "image/jpeg");
+            httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+            return httpd_resp_send(req, reinterpret_cast<const char*>(frame->jpeg.data()),
+                                   frame->jpeg.size());
+        }
         if (path == "/api/lamp/runtime")
             return Json(req, OmniRuntimeState());
 #endif
@@ -108,6 +127,19 @@ esp_err_t Api(httpd_req_t* req) {
                 return ESP_FAIL;
             received += n;
         }
+#if CONFIG_APPLE_LAMP_EDGE_RUNTIME
+        if (path == "/api/lamp/vision") {
+            CJsonUniquePtr parsed(cJSON_ParseWithOpts(body.c_str(), nullptr, true));
+            if (!cJSON_IsObject(parsed.get()) || cJSON_GetArraySize(parsed.get()) != 1 ||
+                lamp::Text(parsed.get(), "op") != "capture")
+                return Json(req, "{\"ok\":false,\"error\":\"Expected capture operation\"}");
+            return Json(
+                req,
+                vision && vision->Request()
+                    ? "{\"ok\":true,\"status\":\"accepted\"}"
+                    : "{\"ok\":false,\"error\":\"Camera unavailable, busy or 2-second cooldown\"}");
+        }
+#endif
         if (path == "/api/lamp/calibration/preview")
             return Json(req, device->PanelConfig(body));
         if (path == "/api/lamp/command")
@@ -121,6 +153,9 @@ esp_err_t Api(httpd_req_t* req) {
     return Json(req, "{\"ok\":false,\"error\":{\"message\":\"Unknown API\"}}");
 }
 }  // namespace
+#if CONFIG_APPLE_LAMP_EDGE_RUNTIME
+void SetLampVision(LampVision* value) { vision = value; }
+#endif
 void StartLampTwinWeb(LampHardwareExecutor& executor) {
     if (server)
         return;

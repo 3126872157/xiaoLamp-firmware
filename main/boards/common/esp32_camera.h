@@ -3,6 +3,7 @@
 
 #include <lvgl.h>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -20,6 +21,7 @@ struct JpegChunk {
 
 class Esp32Camera : public Camera {
 private:
+    std::recursive_mutex capture_mutex_;
     bool streaming_on_ = false;
     bool swap_bytes_enabled_ = true;  // Swap pixel byte order for RGB565, enabled by default
     std::string explain_url_;
@@ -35,6 +37,7 @@ public:
 
     virtual void SetExplainUrl(const std::string& url, const std::string& token) override;
     virtual bool Capture() override;
+    std::expected<CameraJpegFrame, std::string> CaptureJpeg(size_t max_bytes = 65536) override;
     virtual bool SetHMirror(bool enabled) override;
     virtual bool SetVFlip(bool enabled) override;
     virtual bool SetSwapBytes(bool enabled) override;

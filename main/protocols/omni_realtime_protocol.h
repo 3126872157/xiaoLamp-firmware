@@ -8,6 +8,15 @@
 #include <map>
 #include "protocol.h"
 
+struct OmniImage {
+    std::vector<uint8_t> jpeg;
+    uint64_t frame_id = 0;
+    int64_t captured_at_us = 0;
+    unsigned width = 0, height = 0;
+    std::string capture_state;
+};
+void OmniSetVision(std::function<std::shared_ptr<const OmniImage>()> latest);
+
 // Developer credentials use a separate NVS namespace; never return or log the key.
 std::string OmniPanel(const std::string& request = "");
 void OmniSetStateReader(std::function<std::string()> reader);
@@ -74,6 +83,7 @@ private:
     bool continuing_ = false, awaiting_tools_ = false;
     unsigned tool_rounds_ = 0;
     void CompleteTools();
+    bool AppendImage();
     bool Enqueue(Work* work);
     bool Write(const std::string& text);
     void Run();

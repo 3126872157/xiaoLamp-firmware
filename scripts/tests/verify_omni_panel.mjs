@@ -8,14 +8,22 @@ const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH 
 try {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   const errors = [], operations = [];
-  let edge = false;
+  let edge = false, frame = 0;
   page.on('pageerror', e => errors.push(e.message));
   await page.route('http://omni.test/**', async route => {
     const r = route.request();
     if (r.url().endsWith('/api/lamp/omni')) {
       assert.equal(r.headers()['x-lamp-token'], 'test-token');
       if (r.method() === 'POST') operations.push(r.postDataJSON());
-      await route.fulfill({ json: { ok: true, configured: operations.length > 0, status: 'configured', cloud_motion_enabled: edge } });
+      await route.fulfill({ json: { ok: true, configured: operations.length > 0, status: 'configured', cloud_motion_enabled: edge, manual_image_supported: edge } });
+    } else if (r.url().endsWith('/api/lamp/vision/jpeg')) {
+      assert.equal(r.headers()['x-lamp-token'], 'test-token');
+      assert.equal(new URL(r.url()).search, '');
+      await route.fulfill({contentType:'image/jpeg',body:fs.readFileSync(new URL('fixtures/omni/preview.jpg',import.meta.url))});
+    } else if (r.url().endsWith('/api/lamp/vision')) {
+      assert.equal(r.headers()['x-lamp-token'], 'test-token');
+      if(r.method()==='POST'){assert.deepEqual(r.postDataJSON(),{op:'capture'});frame++;await route.fulfill({json:{ok:true,status:'accepted'}});}
+      else await route.fulfill({json:{available:true,busy:false,frame_id:frame,width:16,height:12}});
     } else if (r.url().endsWith('/api/lamp/runtime')) {
       assert.equal(r.headers()['x-lamp-token'], 'test-token');
       await route.fulfill({json:{runtime:{stage:'semantic_tools',vision_enabled:false}}});
@@ -39,6 +47,11 @@ try {
   edge = true; await page.reload();
   await page.waitForFunction(()=>document.querySelector('#runtime-status').textContent.includes('semantic_tools'));
   assert.match(await page.locator('#omni-capability').innerText(), /退出网页手动控制/);
+  await page.locator('#vision-panel summary').click();
+  await page.locator('#vision-capture').click();
+  await page.waitForFunction(()=>{const i=document.querySelector('#vision-preview');return i.complete&&i.naturalWidth===16});
+  assert.equal(await page.locator('#vision-preview').evaluate(i=>i.naturalHeight),12);
+  for(const op of ['vision_on','vision_off']){await page.locator(`[data-omni="${op}"]`).click();await page.waitForFunction(op=>!document.querySelector(`[data-omni="${op}"]`).disabled,op);}
   assert.deepEqual(errors,[]);
   console.log('PASS mobile panel: token, configuration, cleared key and all controls; mocked HTTP');
 } finally { await browser.close(); }

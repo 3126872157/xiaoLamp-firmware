@@ -20,6 +20,10 @@ std::function<std::future<std::string>(const std::string&, const std::string&, u
     runtime_dispatch;
 std::function<void(uint64_t)> runtime_cancel;
 std::string runtime_tools;
+std::function<std::shared_ptr<const OmniImage>()> image_reader;
+bool image_enabled = false;
+std::string image_error;
+std::atomic<uint64_t> image_sent_frame{0};
 std::atomic<uint64_t> turn_sequence{0};
 std::atomic<bool> in_use{false};
 std::atomic<uint32_t> playback_sequence{0};
@@ -62,6 +66,10 @@ void Status(const char* s, const char* e = "", const char* reason = nullptr) {
 }
 }  // namespace
 
+void OmniSetVision(std::function<std::shared_ptr<const OmniImage>()> latest) {
+    std::lock_guard lock(config_mutex);
+    image_reader = std::move(latest);
+}
 void OmniSetStateReader(std::function<std::string()> reader) {
     std::lock_guard lock(config_mutex);
     state_reader = std::move(reader);
@@ -79,7 +87,13 @@ void OmniSetRuntime(
 std::string OmniPanel(const std::string& request) {
     auto body = Parse(request);
     auto op = Str(body.get(), "op");
-    if (op == "configure" || op == "clear") {
+    if (op == "vision_on" || op == "vision_off") {
+        std::lock_guard lock(config_mutex);
+        if (!image_reader || in_use)
+            return R"({"ok":false,"error":{"message":"Close conversation before changing manual image input"}})";
+        image_enabled = op == "vision_on";
+        image_error.clear();
+    } else if (op == "configure" || op == "clear") {
         std::lock_guard lock(config_mutex);
         LoadConfiguration();
         if (in_use)
@@ -111,6 +125,11 @@ std::string OmniPanel(const std::string& request) {
             saved.SetString("key", api_key);
         }
     } else if (op == "start" || op == "vad") {
+        {
+            std::lock_guard lock(config_mutex);
+            if (op == "vad" && image_enabled)
+                return R"({"ok":false,"error":{"message":"Disable manual image input before starting VAD"}})";
+        }
         if (Application::GetInstance().GetDeviceState() != kDeviceStateIdle)
             return R"({"ok":false,"error":{"message":"Cancel/close the current turn first"}})";
         if (op == "start")
@@ -144,6 +163,10 @@ std::string OmniPanel(const std::string& request) {
                             runtime_tools.empty() ? "poc" : "semantic_tools");
     cJSON_AddBoolToObject(j.get(), "credentials_persistent", true);
     cJSON_AddNumberToObject(j.get(), "receive_backpressure_waits", receive_waits);
+    cJSON_AddBoolToObject(j.get(), "manual_image_supported", bool(image_reader));
+    cJSON_AddBoolToObject(j.get(), "manual_image_enabled", image_enabled);
+    cJSON_AddStringToObject(j.get(), "image_error", image_error.c_str());
+    cJSON_AddNumberToObject(j.get(), "image_sent_frame_id", image_sent_frame);
     return Dump(j.get());
 }
 
@@ -323,8 +346,8 @@ std::string OmniRealtimeProtocol::Session(bool manual) {
                     "lamp_rest等待真实成功才告别，不成功就说明失败并保留会话。单独明确要求上力/"
                     "别用力调用lamp_set_torque。"
                     "动作执行前只说准备执行，不能提前声称完成；用户明确命令优先于寒暄。"
-                    "当前仅语义动作接入，尚无图像、陪伴或随语音同步动作，不得声称看"
-                    "见画面或已实现同步。"));
+                    "图片仅在开启手动附图并且本轮实际收到新图片时可用，不能将旧图当实时画面。"
+                    "尚无自主视觉陪伴或随语音同步动作，不得声称已实现这些。"));
         }
     }
     if (!manual)
@@ -693,6 +716,45 @@ std::string OmniRuntimeState() {
     }
     return reader ? reader() : "{}";
 }
+bool OmniRealtimeProtocol::AppendImage() {
+    std::function<std::shared_ptr<const OmniImage>()> reader;
+    {
+        std::lock_guard lock(config_mutex);
+        if (!image_enabled)
+            return true;
+        reader = image_reader;
+        image_error.clear();
+    }
+    auto frame = reader ? reader() : nullptr;
+    const auto age = frame ? esp_timer_get_time() - frame->captured_at_us : -1;
+    if (!manual_ || !had_audio_ || !frame || age < 0 || age > 30000000 || frame->jpeg.size() < 4 ||
+        frame->jpeg.size() > 65536 || frame->jpeg[0] != 0xff || frame->jpeg[1] != 0xd8 ||
+        frame->jpeg[frame->jpeg.size() - 2] != 0xff || frame->jpeg.back() != 0xd9) {
+        std::lock_guard lock(config_mutex);
+        image_error =
+            "Need a fresh (30 seconds) JPEG and real audio in manual mode; recapture then finish "
+            "again";
+        return false;
+    }
+    size_t size = 0;
+    const std::string prefix = "{\"type\":\"input_image_buffer.append\",\"image\":\"";
+    std::string data(prefix.size() + 4 * ((frame->jpeg.size() + 2) / 3) + 3, '\0');
+    std::copy(prefix.begin(), prefix.end(), data.begin());
+    if (mbedtls_base64_encode(reinterpret_cast<unsigned char*>(data.data() + prefix.size()),
+                              data.size() - prefix.size(), &size, frame->jpeg.data(),
+                              frame->jpeg.size()) != 0)
+        return false;
+    data.resize(prefix.size() + size);
+    data += "\"}";
+    if (!Write(data))
+        return false;
+    image_sent_frame = frame->frame_id;
+    Board::GetInstance().RecordDiagnostic("vision_upload", "manual_audio",
+                                          "frame=" + std::to_string(frame->frame_id) +
+                                              "; bytes=" + std::to_string(frame->jpeg.size()) +
+                                              "; age_ms=" + std::to_string(age / 1000));
+    return true;
+}
 void OmniRealtimeProtocol::Run() {
     while (running_) {
         if (awaiting_tools_ && ready_ && !close_ && !cancel_)
@@ -755,6 +817,13 @@ void OmniRealtimeProtocol::Run() {
             if (rest_requested_)
                 continue;
             manual_ = w->text == "@manual";
+            if (!manual_) {
+                std::lock_guard lock(config_mutex);
+                if (image_enabled) {
+                    image_error = "Image input requires manual recording; disable it before VAD";
+                    continue;
+                }
+            }
             // Audio format is immutable after first append; change only turn detection.
             Write(
                 manual_
@@ -766,8 +835,11 @@ void OmniRealtimeProtocol::Run() {
             recording_since_ = esp_timer_get_time();
             Status(manual_ ? "listening_manual" : "listening_vad");
         } else if (w->text == "@finish") {
-            if (manual_ && had_audio_)
+            if (manual_ && had_audio_) {
+                if (!AppendImage())
+                    continue;
                 Write(R"({"type":"input_audio_buffer.commit"})");
+            }
             had_audio_ = false;
         } else
             Write(w->text);

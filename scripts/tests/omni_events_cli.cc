@@ -237,6 +237,37 @@ int main() {
     assert(flaky.ready_ && !flaky.close_);
     assert(flaky.Write(R"({"type":"response.create"})"));
     flaky.Disconnect(false);
+    // Image upload is bounded, manual-only, after real audio append and before commit.
+    in_use = false;
+    auto photo = std::make_shared<OmniImage>();
+    photo->jpeg = {0xff, 0xd8, 0xff, 0xd9};
+    photo->captured_at_us = esp_timer_get_time();
+    photo->frame_id = 1;
+    OmniSetVision([&]() -> std::shared_ptr<const OmniImage> { return photo; });
+    OmniPanel(R"({"op":"vision_on"})");
+    OmniRealtimeProtocol visual;
+    visual.socket_ = std::make_unique<WebSocket>();
+    visual.ready_ = true;
+    assert(!visual.AppendImage() && visual.socket_->sent.empty());
+    assert(visual.Write(R"({"type":"input_audio_buffer.append","audio":"AAAA"})"));
+    visual.had_audio_ = true;
+    assert(visual.AppendImage());
+    assert(visual.Write(R"({"type":"input_audio_buffer.commit"})"));
+    assert(visual.socket_->sent.size() == 3);
+    assert(visual.socket_->sent[1].find("input_image_buffer.append") != std::string::npos);
+    assert(visual.socket_->sent[1].find("/9j/2Q==") != std::string::npos);
+    photo->captured_at_us = esp_timer_get_time() - 30000001;
+    assert(!visual.AppendImage() && visual.socket_->sent.size() == 3);
+    photo->captured_at_us = esp_timer_get_time();
+    photo->jpeg.resize(65537);
+    assert(!visual.AppendImage());
+    photo->jpeg = {0xff, 0xd8, 0xff, 0xd9};
+    visual.manual_ = false;
+    assert(!visual.AppendImage());
+    assert(OmniPanel(R"({"op":"vad"})").find("Disable manual image") != std::string::npos);
+    OmniPanel(R"({"op":"vision_off"})");
+    assert(visual.AppendImage() && visual.socket_->sent.size() == 3);
+    OmniSetVision({});
     auto info = OmniPanel();
     assert(info.find("dummy-secret") == std::string::npos);
     std::cout << "PASS handshake, PCM, stale response, function output/dedup, cancel and corrupt "

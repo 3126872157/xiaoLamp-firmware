@@ -69,11 +69,13 @@ Esp32Camera::~Esp32Camera() {
 }
 
 void Esp32Camera::SetExplainUrl(const std::string& url, const std::string& token) {
+    std::lock_guard lock(capture_mutex_);
     explain_url_ = url;
     explain_token_ = token;
 }
 
 bool Esp32Camera::Capture() {
+    std::lock_guard lock(capture_mutex_);
     if (encoder_thread_.joinable()) {
         encoder_thread_.join();
     }
@@ -151,7 +153,55 @@ bool Esp32Camera::Capture() {
     return true;
 }
 
+std::expected<CameraJpegFrame, std::string> Esp32Camera::CaptureJpeg(size_t max_bytes) {
+    std::lock_guard lock(capture_mutex_);
+    if (!max_bytes || max_bytes > 65536 || !Capture())
+        return std::unexpected("Camera unavailable/capture failed");
+    CameraJpegFrame frame;
+    frame.width = current_fb_->width;
+    frame.height = current_fb_->height;
+    frame.jpeg.reserve(max_bytes);
+    if (current_fb_->format == PIXFORMAT_JPEG) {
+        if (current_fb_->len > max_bytes)
+            return std::unexpected("JPEG exceeds configured bound");
+        frame.jpeg.assign(current_fb_->buf, current_fb_->buf + current_fb_->len);
+        return frame;
+    }
+    if (current_fb_->format != PIXFORMAT_RGB565)
+        return std::unexpected("Unsupported local capture pixel format");
+    struct Output {
+        std::vector<uint8_t>* bytes;
+        size_t max;
+        bool overflow = false;
+    };
+    // Retry lower quality without allowing an oversized allocation.
+    for (unsigned quality : {70u, 45u, 25u}) {
+        frame.jpeg.clear();
+        Output output{&frame.jpeg, max_bytes};
+        const bool ok = image_to_jpeg_cb(
+            encode_buf_, current_fb_->len, frame.width, frame.height, V4L2_PIX_FMT_RGB565, quality,
+            [](void* arg, size_t, const void* data, size_t len) -> size_t {
+                auto& out = *static_cast<Output*>(arg);
+                if (!data || !len)
+                    return len;
+                if (len > out.max - out.bytes->size()) {
+                    out.overflow = true;
+                    return 0;
+                }
+                const auto* bytes = static_cast<const uint8_t*>(data);
+                out.bytes->insert(out.bytes->end(), bytes, bytes + len);
+                return len;
+            },
+            &output);
+        if (ok && !output.overflow && frame.jpeg.size() > 4 && frame.jpeg[0] == 0xff &&
+            frame.jpeg[1] == 0xd8)
+            return frame;
+    }
+    return std::unexpected("JPEG encoding failed or exceeded 64 KiB");
+}
+
 bool Esp32Camera::SetHMirror(bool enabled) {
+    std::lock_guard lock(capture_mutex_);
     sensor_t* s = esp_camera_sensor_get();
     if (!s) {
         return false;
@@ -161,6 +211,7 @@ bool Esp32Camera::SetHMirror(bool enabled) {
 }
 
 bool Esp32Camera::SetVFlip(bool enabled) {
+    std::lock_guard lock(capture_mutex_);
     sensor_t* s = esp_camera_sensor_get();
     if (!s) {
         return false;
@@ -170,11 +221,13 @@ bool Esp32Camera::SetVFlip(bool enabled) {
 }
 
 bool Esp32Camera::SetSwapBytes(bool enabled) {
+    std::lock_guard lock(capture_mutex_);
     swap_bytes_enabled_ = enabled;
     return true;
 }
 
 std::expected<std::string, std::string> Esp32Camera::Explain(const std::string& question) {
+    std::lock_guard lock(capture_mutex_);
     if (explain_url_.empty()) {
         return std::unexpected("Image explain URL or token is not set");
     }
