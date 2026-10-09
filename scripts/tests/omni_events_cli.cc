@@ -85,6 +85,25 @@ int main() {
     p.ready_ = false;
     p.audio_recovering_ = false;
     p.socket_ = std::make_unique<WebSocket>();
+    std::string raw_pcm(1920, '\0');
+    for (size_t i = 0; i < raw_pcm.size(); ++i)
+        raw_pcm[i] = char(i % 256);
+    assert(p.AppendPcm(raw_pcm));
+    assert(p.socket_->sent.size() == 2 && p.socket_->frames == 2 && p.socket_->pending.empty());
+    std::string restored_pcm;
+    for (const auto& message : p.socket_->sent) {
+        auto json = Parse(message);
+        auto encoded = Str(json.get(), "audio");
+        unsigned char decoded[1024];
+        size_t size = 0;
+        assert(message.size() < 2048 &&
+               mbedtls_base64_decode(decoded, sizeof(decoded), &size,
+                                     reinterpret_cast<const unsigned char*>(encoded.data()),
+                                     encoded.size()) == 0);
+        restored_pcm.append(reinterpret_cast<char*>(decoded), size);
+    }
+    assert(restored_pcm == raw_pcm);
+    p.socket_ = std::make_unique<WebSocket>();
     unsigned opened = 0, audio = 0, starts = 0, stops = 0, errors = 0, reads = 0;
     p.OnAudioChannelOpened([&] { opened++; });
     p.OnNetworkError([&](const std::string&) { errors++; });
@@ -526,14 +545,53 @@ int main() {
         R"({"type":"response.function_call_arguments.done","response_id":"silent","name":"lamp_express","call_id":"silent-1","arguments":"{\"speech\":null,\"action\":\"nod\"}"})");
     const auto before = silent.socket_->sent.size();
     silent.Receive(R"({"type":"response.done","response":{"id":"silent","status":"completed"}})");
-    assert(silent.expression_.silent && !silent.continuing_);
+    assert(silent.expression_.silent && silent.continuing_ && !silent.recording_);
     for (size_t i = before; i < silent.socket_->sent.size(); ++i)
         assert(silent.socket_->sent[i].find("response.create") == std::string::npos);
     silent.PollExpression();
     assert(released_count == 2 && silent.expression_.args.empty());
     silent.PollExpression();
     assert(released_count == 2);
+    assert(silent.silent_phase_ == OmniRealtimeProtocol::SilentPhase::Configure);
+    silent.Receive(R"({"type":"session.updated","session":{"modalities":["text"]}})");
+    assert(silent.socket_->sent.back().find("response.create") != std::string::npos);
+    silent.Receive(R"({"type":"response.created","response":{"id":"silent-followup"}})");
+    silent.Receive(
+        R"({"type":"response.audio.delta","response_id":"silent-followup","delta":"AAAA"})");
+    silent.Receive(
+        R"({"type":"response.done","response":{"id":"silent-followup","status":"completed"}})");
+    assert(silent.silent_phase_ == OmniRealtimeProtocol::SilentPhase::Restore);
+    silent.Receive(R"({"type":"session.updated","session":{"modalities":["text","audio"]}})");
+    assert(silent.silent_phase_ == OmniRealtimeProtocol::SilentPhase::Idle && !silent.close_);
+    // Missing model tools can only be compensated from the matching real ASR item.
+    silent.turn_input_item_ = "u1";
+    silent.user_transcripts_["u1"] = "一边说话一边点头";
+    assert(silent.ExplicitExpression().first == "A01" && !silent.ExplicitExpression().second);
+    silent.user_transcripts_["u1"] = "点头不要说话";
+    assert(silent.ExplicitExpression().second);
+    silent.user_transcripts_["u1"] = "只说话不要点头";
+    assert(silent.ExplicitExpression().first.empty());
+    silent.turn_input_item_ = "new-untranscribed-item";
+    assert(silent.ExplicitExpression().first.empty());
     silent.Disconnect(false);
+    OmniRealtimeProtocol missed;
+    missed.ready_ = true;
+    missed.manual_ = false;
+    missed.socket_ = std::make_unique<WebSocket>();
+    unsigned leaked_pcm = 0;
+    missed.OnIncomingAudio([&](auto) { ++leaked_pcm; });
+    missed.Receive(R"({"type":"input_audio_buffer.committed","item_id":"actual-user-1"})");
+    missed.Receive(
+        R"({"type":"conversation.item.input_audio_transcription.completed","item_id":"actual-user-1","transcript":"点头不要说话"})");
+    missed.Receive(R"({"type":"response.created","response":{"id":"no-tools"}})");
+    missed.Receive(R"({"type":"response.audio.delta","response_id":"no-tools","delta":"AAAA"})");
+    missed.PollExpression();
+    assert(leaked_pcm == 0 && released_count == 3);
+    missed.PollExpression();
+    assert(released_count == 3);
+    missed.Receive(R"({"type":"response.done","response":{"id":"no-tools","status":"completed"}})");
+    assert(missed.recording_ && !missed.close_);
+    missed.Disconnect(false);
     OmniSetRuntime({}, {}, "");
     OmniSetStateReader({});
     OmniSetVision({});

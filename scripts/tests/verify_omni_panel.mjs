@@ -56,7 +56,10 @@ try {
   await page.locator('#companion-interval').fill('10');
   await page.locator('#companion-start').click();
   await page.waitForFunction(()=>!document.querySelector('#companion-start').disabled);
-  assert.deepEqual(operations.at(-1),{op:'companion',enabled:true,actions:false,interval_s:10});
+  assert.deepEqual(operations.at(-1),{op:'companion',enabled:true,actions:true,interval_s:10});
+  await page.locator('#companion-actions').uncheck();
+  await new Promise(r=>setTimeout(r,100));
+  assert.equal(operations.at(-1).actions,false);
   await page.locator('#companion-actions').check();
   await page.waitForFunction(()=>document.querySelector('#omni-status').textContent.includes('configured'));
   await new Promise(r=>setTimeout(r,100));

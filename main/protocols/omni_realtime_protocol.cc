@@ -25,6 +25,7 @@ bool image_enabled = false;
 std::function<void(bool, unsigned)> vision_periodic;
 std::function<bool(const OmniImage&)> image_valid;
 bool companion_enabled = false, companion_actions = false;
+bool transcription_enabled = false;
 unsigned observation_interval_s = 5;
 std::atomic<bool> observation_once{false}, observation_reset{false};
 std::string observation_status = "disabled", observation_error, observation_cache;
@@ -125,12 +126,20 @@ void OmniSetRuntime(
     runtime_dispatch = std::move(dispatch);
     runtime_cancel = std::move(cancel);
     runtime_tools = tools;
+    if (runtime_dispatch)
+        transcription_enabled = true;
 }
 
 std::string OmniPanel(const std::string& request) {
     auto body = Parse(request);
     auto op = Str(body.get(), "op");
-    if (op == "companion" || op == "observe_once") {
+    if (op == "transcription") {
+        std::lock_guard lock(config_mutex);
+        auto* enabled = cJSON_GetObjectItem(body.get(), "enabled");
+        if (in_use || !cJSON_IsBool(enabled))
+            return R"({"ok":false,"error":{"message":"Close conversation before changing transcription"}})";
+        transcription_enabled = cJSON_IsTrue(enabled);
+    } else if (op == "companion" || op == "observe_once") {
         std::lock_guard lock(config_mutex);
         if (!image_reader || !in_use)
             return R"({"ok":false,"error":{"message":"Start VAD conversation first; this experiment reuses that connection"}})";
@@ -237,6 +246,7 @@ std::string OmniPanel(const std::string& request) {
     cJSON_AddNumberToObject(j.get(), "image_sent_frame_id", image_sent_frame);
     cJSON_AddBoolToObject(j.get(), "companion_enabled", companion_enabled);
     cJSON_AddBoolToObject(j.get(), "companion_actions", companion_actions);
+    cJSON_AddBoolToObject(j.get(), "transcription_enabled", transcription_enabled);
     cJSON_AddNumberToObject(j.get(), "observation_interval_s", observation_interval_s);
     cJSON_AddStringToObject(j.get(), "observation_status", observation_status.c_str());
     cJSON_AddStringToObject(j.get(), "observation_error", observation_error.c_str());
@@ -353,7 +363,8 @@ bool OmniRealtimeProtocol::SendText(const std::string& s) {
     return Enqueue(new Work{s, false, false, epoch_});
 }
 bool OmniRealtimeProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> p) {
-    if (!ready_ || (!recording_ && !audio_recovering_) || rest_requested_)
+    if (!ready_ || silent_phase_ != SilentPhase::Idle || (!recording_ && !audio_recovering_) ||
+        rest_requested_)
         return true;
     if (!p->pcm16 || p->sample_rate != 16000 || p->payload.empty() || p->payload.size() > 8192)
         return false;
@@ -381,6 +392,25 @@ void OmniRealtimeProtocol::SendAbortSpeaking(AbortReason reason) {
     ++epoch_;
     cancel_ = true;
 }
+bool OmniRealtimeProtocol::AppendPcm(const std::string& pcm) {
+    // 30 ms mono PCM16 = 960 bytes: each JSON append fits a single <= 2048-byte
+    // WebSocket frame, including during UART planning. No sample loss or resending.
+    for (size_t offset = 0; offset < pcm.size(); offset += 960) {
+        const auto bytes = std::min(size_t(960), pcm.size() - offset);
+        size_t length = 0;
+        std::string encoded(4 * ((bytes + 2) / 3) + 1, '\0');
+        if (mbedtls_base64_encode(
+                reinterpret_cast<unsigned char*>(encoded.data()), encoded.size(), &length,
+                reinterpret_cast<const unsigned char*>(pcm.data() + offset), bytes) != 0) {
+            Fail("PCM encoding failed");
+            return false;
+        }
+        encoded.resize(length);
+        if (!Write("{\"type\":\"input_audio_buffer.append\",\"audio\":\"" + encoded + "\"}"))
+            return false;
+    }
+    return true;
+}
 bool OmniRealtimeProtocol::Write(const std::string& s) {
     if (close_ || disconnected_)
         return false;
@@ -407,6 +437,9 @@ bool OmniRealtimeProtocol::Write(const std::string& s) {
             (!socket_                  ? "; no socket"
              : !socket_->IsConnected() ? "; disconnected socket"
                                        : "; socket send returned false"));
+    Board::GetInstance().RecordDiagnostic("attention", "特别关注/通信失败取消动作",
+                                          "event=" + Str(event.get(), "type") + "; turn=" +
+                                              std::to_string(turn_) + "; task=" + expression_task_);
     Fail("Omni transport send failed; reopen conversation to create a fresh connection");
     return false;
 }
@@ -464,13 +497,18 @@ std::string OmniRealtimeProtocol::Session(bool manual, bool include_audio) {
                     "工具ok:false后不得声称现在好了或成功；只能说真实失败原因。表达必须先调lamp_"
                     "express，不得只描述动作。用户要求只做动作不要说话时，先调用lamp_"
                     "express并传speak:false、action或skill_"
-                    "id，禁止口头前缀及成功回复；失败可简短解释。后台视觉仅明确开启后运行，观察正文"
+                    "id，禁止口头前缀及成功回复；失败可简短解释。VAD会话默认开启陪伴观察及已使能时"
+                    "的轻量动作，观察正文"
                     "不朗读。开心、好奇、赞同等说话伴随表达使用la"
                     "mp_express，先预备再自然说话，不用lamp_run_"
                     "sequence串行表达，不提前播报要做动作。prepared仅预备，本地随实际播放释放，失败"
                     "要说真实原因；成功表达不用再说好或报告完成。普通事实问答可只说话。"));
         }
     }
+    cJSON_AddItemToObject(cJSON_GetObjectItem(j.get(), "session"), "input_audio_transcription",
+                          transcription_enabled
+                              ? cJSON_Parse(R"({"model":"qwen3-asr-flash-realtime"})")
+                              : cJSON_CreateNull());
     if (!manual)
         cJSON_ReplaceItemInObject(
             cJSON_GetObjectItem(j.get(), "session"), "turn_detection",
@@ -556,6 +594,14 @@ void OmniRealtimeProtocol::Disconnect(bool notify) {
     output_drained_ = true;
     expression_used_turn_ = 0;
     failure_notification_ = false;
+    silent_phase_ = SilentPhase::Idle;
+    companion_default_applied_ = false;
+    response_motion_tool_ = false;
+    user_transcripts_.clear();
+    latest_input_item_.clear();
+    turn_input_item_.clear();
+    fallback_prepare_ = {};
+    fallback_skill_.clear();
     {
         std::lock_guard lock(config_mutex);
         companion_enabled = false;
@@ -622,8 +668,28 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
         return;
     }
     auto type = Str(j.get(), "type");
+    if (type == "conversation.item.input_audio_transcription.completed") {
+        const auto item = Str(j.get(), "item_id"), text = Str(j.get(), "transcript");
+        if (observation_phase_ == ObservationPhase::Idle && silent_phase_ == SilentPhase::Idle &&
+            !item.empty() && text.size() <= 4096) {
+            if (user_transcripts_.size() >= 8)
+                user_transcripts_.clear();
+            user_transcripts_[item] = text;
+            Board::GetInstance().RecordDiagnostic("user", item, text);
+        }
+        return;
+    }
+    if (type == "conversation.item.input_audio_transcription.failed") {
+        Board::GetInstance().RecordDiagnostic("attention", "特别关注/用户转写失败",
+                                              Str(cJSON_GetObjectItem(j.get(), "error"), "code"));
+        return;
+    }
+    if (SilentEvent(j.get(), type))
+        return;
     if (ObservationEvent(j.get(), type))
         return;
+    if (type == "input_audio_buffer.committed")
+        latest_input_item_ = Str(j.get(), "item_id");
     if (type == "session.created") {
         session_id_ = Str(cJSON_GetObjectItem(j.get(), "session"), "id");
         Write(Session(true));
@@ -660,6 +726,10 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
             awaiting_tools_ = continuing_ = false;
         }
         if (!continuing_) {
+            response_motion_tool_ = false;
+            turn_input_item_ = latest_input_item_;
+            fallback_prepare_ = {};
+            fallback_skill_.clear();
             expression_ = {};
             {
                 std::lock_guard lock(config_mutex);
@@ -673,15 +743,29 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
         recording_ = false;
         transcript_.clear();
         speaking_ = false;
+        response_audio_suppressed_ = false;
         playback_ = ++playback_sequence;
         if (!playback_)
             playback_ = ++playback_sequence;
         if (!expression_.args.empty() && expression_.turn == turn_)
             expression_.playback = playback_;
+        Board::GetInstance().RecordDiagnostic(
+            "response", "start", "turn=" + std::to_string(turn_) + "; response=" + response_);
         Status("responding");
     } else if (type == "response.audio.delta") {
         if (response_.empty() || !playback_ || Str(j.get(), "response_id") != response_)
             return;
+        if (!ExplicitExpression().first.empty())
+            PrepareFallback();
+        if (ExplicitExpression().second) {
+            if (!response_audio_suppressed_) {
+                response_audio_suppressed_ = true;
+                Board::GetInstance().RecordDiagnostic(
+                    "silent_output", "suppressed",
+                    "Explicit user requested no speech; model PCM not played");
+            }
+            return;
+        }
         auto encoded = Str(j.get(), "delta");
         if (encoded.empty() || encoded.size() > 24576) {
             Fail("Oversized Omni audio event");
@@ -752,6 +836,15 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
             tool.output =
                 R"({"ok":false,"error":"Session tool cache full; start a new conversation"})";
         }
+        if (name == "lamp_express" || name == "lamp_run_sequence" || name == "lamp_set_mode" ||
+            name == "lamp_rest")
+            response_motion_tool_ = true;
+        auto call_info = Parse("{}");
+        cJSON_AddStringToObject(call_info.get(), "call_id", call.c_str());
+        cJSON_AddStringToObject(call_info.get(), "response_id", response_.c_str());
+        cJSON_AddNumberToObject(call_info.get(), "turn", double(turn_.load()));
+        cJSON_AddStringToObject(call_info.get(), "arguments", arguments.substr(0, 1024).c_str());
+        Board::GetInstance().RecordDiagnostic("function_call", name, Dump(call_info.get()));
         if (tool.name == "lamp_express")
             Board::GetInstance().RecordDiagnostic("expression_arguments", tool.id,
                                                   tool.arguments.substr(0, 1024));
@@ -769,7 +862,18 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
             Fail("Omni response failed or exceeded its output limit");
             return;
         }
-        if (!transcript_.empty() && playback_)
+        PrepareFallback();
+        if (!transcript_.empty()) {
+            auto output = Parse("{}");
+            cJSON_AddStringToObject(output.get(), "response_id", response_.c_str());
+            cJSON_AddNumberToObject(output.get(), "turn", double(turn_.load()));
+            cJSON_AddStringToObject(output.get(), "text", transcript_.c_str());
+            cJSON_AddBoolToObject(output.get(), "audio_received", speaking_);
+            cJSON_AddBoolToObject(output.get(), "audio_suppressed", response_audio_suppressed_);
+            Board::GetInstance().RecordDiagnostic("assistant_output", "model", Dump(output.get()));
+        }
+        DiagnoseResponse();
+        if (!transcript_.empty() && playback_ && speaking_)
             Emit("sentence_start", transcript_);
         if (!tools_.empty() && playback_ && Str(resp, "status") == "completed") {
             if (++tool_rounds_ > 4) {
@@ -779,6 +883,8 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
             awaiting_tools_ = true;
             CompleteTools();
         } else {
+            if (ExplicitExpression().second && !speaking_ && !rest_requested_)
+                recording_ = !manual_;
             Status(rest_requested_ ? "rest_pending" : "ready");
             rest_reply_done_ = rest_requested_.load();
             if ((speaking_ || rest_requested_) && playback_)
@@ -841,11 +947,17 @@ void OmniRealtimeProtocol::CompleteTools() {
                     tool.output =
                         R"({"ok":false,"error":"Motion suppressed by stop/unload in the same response"})";
             } else if (tool.name == "lamp_express") {
-                if (stop_batch || explicit_motion || expression_used_turn_ == turn_ ||
-                    !expression_.args.empty() || expression_result_.valid() ||
-                    !expression_task_.empty() ||
-                    (expression_last_release_ &&
-                     esp_timer_get_time() - expression_last_release_ < 2500000))
+                auto incoming = Parse(tool.arguments);
+                if (!fallback_skill_.empty() &&
+                    (expression_used_turn_ == turn_ || fallback_prepare_.valid()) &&
+                    Str(incoming.get(), "skill_id") == fallback_skill_) {
+                    tool.output =
+                        R"({"ok":true,"status":"already_handled","instruction":"Same explicit user expression already scheduled locally; do not repeat or claim physical completion."})";
+                } else if (stop_batch || explicit_motion || expression_used_turn_ == turn_ ||
+                           !expression_.args.empty() || expression_result_.valid() ||
+                           !expression_task_.empty() ||
+                           (expression_last_release_ &&
+                            esp_timer_get_time() - expression_last_release_ < 2500000))
                     tool.output =
                         R"({"ok":false,"error":"Expression skipped: busy/cooldown/control or one motion per turn"})";
                 else if (dispatch) {
@@ -961,9 +1073,16 @@ void OmniRealtimeProtocol::CompleteTools() {
         if (speaking_ && playback_)
             Emit("stop");
         speaking_ = false;
-        continuing_ = false;
-        recording_ = !manual_;
-        Status(manual_ ? "ready" : "listening_vad");
+        continuing_ = true;
+        recording_ = false;
+        silent_phase_ = SilentPhase::Configure;
+        silent_deadline_ = esp_timer_get_time() + 10000000;
+        Work* stale = nullptr;
+        while (audio_queue_ && xQueueReceive(audio_queue_, &stale, 0) == pdTRUE)
+            delete stale;
+        Status("finishing_silent_turn");
+        Write(
+            R"({"type":"session.update","session":{"modalities":["text"],"tools":[],"turn_detection":null}})");
         return;
     }
     continuing_ = true;
@@ -1026,7 +1145,33 @@ bool OmniRealtimeProtocol::SendImageFrame(const OmniImage& value) {
 }
 void OmniRealtimeProtocol::PollExpression() {
     const auto now = esp_timer_get_time();
+    if (fallback_prepare_.valid() &&
+        fallback_prepare_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        auto result = Parse(fallback_prepare_.get());
+        if (cJSON_IsTrue(cJSON_GetObjectItem(result.get(), "ok")) &&
+            Str(result.get(), "status") == "prepared") {
+            expression_used_turn_ = turn_;
+            expression_.args = Dump(cJSON_GetObjectItem(result.get(), "args"));
+            expression_.silent = fallback_silent_;
+            expression_.turn = turn_;
+            expression_.playback = playback_;
+            expression_.deadline = now + 10000000;
+            std::function<std::string()> read;
+            {
+                std::lock_guard lock(config_mutex);
+                read = state_reader;
+            }
+            expression_.mode = Str(Parse(read ? read() : "{}").get(), "mode");
+            Board::GetInstance().RecordDiagnostic("expression_prepared", "verified_user_fallback",
+                                                  fallback_skill_);
+        } else {
+            expression_failure_ = Str(result.get(), "error");
+            Board::GetInstance().RecordDiagnostic("attention", "特别关注/用户动作补偿失败",
+                                                  expression_failure_);
+        }
+    }
     if (!ready_ || close_ || cancel_ || rest_requested_) {
+        fallback_prepare_ = {};
         expression_ = {};
         return;
     }
@@ -1082,6 +1227,8 @@ void OmniRealtimeProtocol::PollExpression() {
             expression_task_.clear();
             Board::GetInstance().RecordDiagnostic("expression_failed", "hardware",
                                                   expression_failure_);
+            Board::GetInstance().RecordDiagnostic("attention", "特别关注/表达执行失败",
+                                                  expression_failure_);
         } else if (status == "completed" || status == "cancelled") {
             expression_task_.clear();
             Board::GetInstance().RecordDiagnostic("expression_finished", status,
@@ -1101,11 +1248,11 @@ void OmniRealtimeProtocol::PollExpression() {
         auto args = Parse("{}");
         cJSON_AddStringToObject(args.get(), "task_id", expression_task_.c_str());
         expression_result_ = dispatch("lamp_get_task", Dump(args.get()), expression_motion_turn_);
-        expression_poll_at_ = now + 250000;
+        expression_poll_at_ = now + 750000;
     }
-    if (!expression_failure_.empty() && response_.empty() && !awaiting_tools_ && output_drained_ &&
-        observation_phase_ == ObservationPhase::Idle && quiet_since_ &&
-        now - quiet_since_ >= 2500000) {
+    if (silent_phase_ == SilentPhase::Idle && !expression_failure_.empty() && response_.empty() &&
+        !awaiting_tools_ && output_drained_ && observation_phase_ == ObservationPhase::Idle &&
+        quiet_since_ && now - quiet_since_ >= 2500000) {
         auto config = Parse(Session(manual_, false));
         auto* session = cJSON_GetObjectItem(config.get(), "session");
         const std::string instruction =
@@ -1249,7 +1396,7 @@ void OmniRealtimeProtocol::PollObservation() {
         manual_ || !recording_ || !response_.empty() || awaiting_tools_ || speaking_ ||
         !quiet_since_ || now - quiet_since_ < 2500000 || background_task_.valid() ||
         !expression_.args.empty() || expression_result_.valid() || !expression_task_.empty() ||
-        !expression_failure_.empty() || failure_notification_)
+        !expression_failure_.empty() || failure_notification_ || silent_phase_ != SilentPhase::Idle)
         return;
     auto frame = reader ? reader() : nullptr;
     if (!frame || frame->frame_id == observed_frame_ ||
@@ -1288,6 +1435,7 @@ void OmniRealtimeProtocol::PollObservation() {
     auto config = Parse(
         R"({"type":"session.update","session":{"modalities":["text"],"tools":[],"turn_detection":null}})");
     auto* session = cJSON_GetObjectItem(config.get(), "session");
+    cJSON_AddNullToObject(session, "input_audio_transcription");
     const auto instruction =
         std::string(
             "这是独立后台视觉观察轮次，不是用户说话。真实麦克风片段只作环境采样，不把噪声解释成命令"
@@ -1362,16 +1510,8 @@ bool OmniRealtimeProtocol::ObservationEvent(const cJSON* j, const std::string& t
             had_audio_ = false;
             observation_frame_.reset();
             if (!speech_prefill_.empty()) {
-                size_t n = 0;
-                std::string encoded(4 * ((speech_prefill_.size() + 2) / 3) + 1, '\0');
-                if (mbedtls_base64_encode(
-                        reinterpret_cast<unsigned char*>(encoded.data()), encoded.size(), &n,
-                        reinterpret_cast<const unsigned char*>(speech_prefill_.data()),
-                        speech_prefill_.size()) == 0) {
-                    encoded.resize(n);
+                if (AppendPcm(speech_prefill_))
                     had_audio_ = true;
-                    Write("{\"type\":\"input_audio_buffer.append\",\"audio\":\"" + encoded + "\"}");
-                }
                 speech_prefill_.clear();
             }
             Status("listening_vad");
@@ -1532,6 +1672,129 @@ bool OmniRealtimeProtocol::ObservationEvent(const cJSON* j, const std::string& t
     }
     return type.starts_with("response.");
 }
+std::pair<std::string, bool> OmniRealtimeProtocol::ExplicitExpression() const {
+    auto found = user_transcripts_.find(turn_input_item_);
+    if (turn_input_item_.empty() || found == user_transcripts_.end())
+        return {};
+    const auto& text = found->second;
+    for (const auto* denied :
+         {"不要点", "不点头", "别点", "不用点", "不要摇", "别摇", "只说话", "不要动", "别动",
+          "不做动作", "不要低头", "不低头", "别低头", "不要歪", "别歪", "不歪头", "不要摆", "别摆"})
+        if (text.find(denied) != std::string::npos)
+            return {};
+    const bool silent =
+        text.find("不要说话") != std::string::npos || text.find("不说话") != std::string::npos ||
+        text.find("只动") != std::string::npos || text.find("安静") != std::string::npos;
+    const bool combined = text.find("边说") != std::string::npos ||
+                          text.find("一边") != std::string::npos ||
+                          text.find("同时") != std::string::npos;
+    for (const auto& entry : {std::pair{"点头", "A01"},
+                              {"点点头", "A01"},
+                              {"点一下头", "A01"},
+                              {"摇头", "B01"},
+                              {"摇下头", "B01"},
+                              {"摇一下头", "B01"},
+                              {"歪头", "B02"},
+                              {"低头", "A03"},
+                              {"摇摆", "A02"},
+                              {"摆动", "A02"}}) {
+        if (text.find(entry.first) == std::string::npos)
+            continue;
+        if (silent || combined || text.starts_with(entry.first) ||
+            text.starts_with(std::string("请") + entry.first) ||
+            text.starts_with(std::string("你") + entry.first))
+            return {entry.second, silent};
+    }
+    return {};
+}
+void OmniRealtimeProtocol::PrepareFallback() {
+    const auto intent = ExplicitExpression();
+    if (intent.first.empty() || response_motion_tool_ || expression_used_turn_ == turn_ ||
+        fallback_prepare_.valid() || !expression_.args.empty() || expression_result_.valid() ||
+        !expression_task_.empty())
+        return;
+    decltype(runtime_dispatch) dispatch;
+    {
+        std::lock_guard lock(config_mutex);
+        dispatch = runtime_dispatch;
+    }
+    if (!dispatch)
+        return;
+    fallback_skill_ = intent.first;
+    fallback_silent_ = intent.second;
+    fallback_prepare_ = dispatch("lamp_prepare_expression",
+                                 "{\"skill_id\":\"" + intent.first +
+                                     "\",\"speak\":" + (intent.second ? "false" : "true") + "}",
+                                 turn_);
+    response_motion_tool_ = true;
+    Board::GetInstance().RecordDiagnostic("attention", "特别关注/模型漏工具已补偿",
+                                          "Verified user item=" + turn_input_item_ +
+                                              "; skill=" + intent.first +
+                                              "; no automatic torque enable; awaiting validation");
+}
+void OmniRealtimeProtocol::DiagnoseResponse() {
+    if (!response_motion_tool_ && (transcript_.find("边说边点头") != std::string::npos ||
+                                   transcript_.find("点了") != std::string::npos ||
+                                   transcript_.find("点一下头") != std::string::npos ||
+                                   transcript_.find("摇一下头") != std::string::npos))
+        Board::GetInstance().RecordDiagnostic("attention", "特别关注/疑似只说未动",
+                                              "No motion tool in turn=" + std::to_string(turn_) +
+                                                  "; response=" + response_ +
+                                                  "; claim=" + transcript_.substr(0, 256));
+}
+bool OmniRealtimeProtocol::SilentEvent(const cJSON* j, const std::string& type) {
+    const auto phase = silent_phase_.load();
+    if (phase == SilentPhase::Idle)
+        return false;
+    if (type == "error")
+        return false;  // Existing error diagnostics still own failures.
+    if (type == "session.updated") {
+        auto* modalities = cJSON_GetObjectItem(cJSON_GetObjectItem(j, "session"), "modalities");
+        if (phase == SilentPhase::Configure && cJSON_GetArraySize(modalities) == 1 &&
+            cJSON_IsString(cJSON_GetArrayItem(modalities, 0)) &&
+            std::string(cJSON_GetArrayItem(modalities, 0)->valuestring) == "text") {
+            silent_phase_ = SilentPhase::Model;
+            Write(R"({"type":"response.create"})");
+        } else if (phase == SilentPhase::Restore && cJSON_GetArraySize(modalities) == 2 &&
+                   cJSON_IsString(cJSON_GetArrayItem(modalities, 1)) &&
+                   std::string(cJSON_GetArrayItem(modalities, 1)->valuestring) == "audio") {
+            silent_phase_ = SilentPhase::Idle;
+            recording_ = !manual_;
+            had_audio_ = false;
+            Status(manual_ ? "ready" : "listening_vad");
+            Board::GetInstance().RecordDiagnostic(
+                "silent_turn", "completed",
+                "text-only continuation completed; foreground config confirmed");
+        }
+        return true;
+    }
+    if (phase == SilentPhase::Model && type == "response.created") {
+        response_ = Str(cJSON_GetObjectItem(j, "response"), "id");
+        continuing_ = false;
+        playback_ = 0;
+        return true;
+    }
+    if (phase == SilentPhase::Model && type == "response.done" &&
+        Str(cJSON_GetObjectItem(j, "response"), "id") == response_) {
+        const auto status = Str(cJSON_GetObjectItem(j, "response"), "status");
+        if (status != "completed") {
+            Fail("Silent tool continuation failed");
+            return true;
+        }
+        response_.clear();
+        silent_phase_ = SilentPhase::Restore;
+        silent_deadline_ = esp_timer_get_time() + 5000000;
+        Write(Session(manual_, false));
+        return true;
+    }
+    if (type == "response.audio.delta") {
+        Board::GetInstance().RecordDiagnostic("attention", "特别关注/静默轮次出现音频",
+                                              "Suppressed; no PCM sent to speaker");
+        return true;
+    }
+    return type.starts_with("response.") || type == "input_audio_buffer.committed" ||
+           type == "input_audio_buffer.speech_started";
+}
 void OmniRealtimeProtocol::RecoverAudioInput() {
     if (!audio_overrun_.exchange(false))
         return;
@@ -1571,6 +1834,8 @@ void OmniRealtimeProtocol::Run() {
         if (manual_ && recording_ && recording_since_ &&
             esp_timer_get_time() - recording_since_ > 30000000)
             Fail("Manual recording exceeded 30 seconds; start a new turn");
+        if (silent_phase_ != SilentPhase::Idle && esp_timer_get_time() > silent_deadline_)
+            Fail("Silent tool turn completion timed out; inspect cloud ACK");
         // No arbitrary five-minute failure; provider disconnects remain explicit errors.
         if (cancel_.exchange(false)) {
             cancelled_response_ = response_;
@@ -1623,7 +1888,7 @@ void OmniRealtimeProtocol::Run() {
                 }
                 continue;
             }
-            if (!recording_)
+            if (!recording_ || silent_phase_ != SilentPhase::Idle)
                 continue;
             if (!quiet) {
                 quiet_since_ = esp_timer_get_time();
@@ -1646,21 +1911,13 @@ void OmniRealtimeProtocol::Run() {
             if (observation_phase_ == ObservationPhase::Configure ||
                 observation_phase_ == ObservationPhase::Model)
                 continue;
-            size_t length = 0;
-            std::string encoded(4 * ((w->text.size() + 2) / 3) + 1, '\0');
-            if (mbedtls_base64_encode(
-                    reinterpret_cast<unsigned char*>(encoded.data()), encoded.size(), &length,
-                    reinterpret_cast<const unsigned char*>(w->text.data()), w->text.size()) != 0) {
-                Fail("PCM encoding failed");
-                continue;
-            }
-            encoded.resize(length);
-            if (Write("{\"type\":\"input_audio_buffer.append\",\"audio\":\"" + encoded + "\"}"))
+            if (AppendPcm(w->text)) {
                 had_audio_ = true;
-            if (observation_phase_ == ObservationPhase::Sample)
-                sample_sent_ = true;
+                if (observation_phase_ == ObservationPhase::Sample)
+                    sample_sent_ = true;
+            }
         } else if (w->text == "@manual" || w->text == "@vad") {
-            if (rest_requested_)
+            if (rest_requested_ || silent_phase_ != SilentPhase::Idle)
                 continue;
             manual_ = w->text == "@manual";
             if (!manual_) {
@@ -1679,6 +1936,18 @@ void OmniRealtimeProtocol::Run() {
             had_audio_ = false;
             recording_ = true;
             recording_since_ = esp_timer_get_time();
+            if (!manual_ && !companion_default_applied_) {
+                std::lock_guard lock(config_mutex);
+                companion_default_applied_ = true;
+                companion_enabled = bool(image_reader) && bool(runtime_dispatch);
+                companion_actions = companion_enabled;
+                if (vision_periodic)
+                    vision_periodic(companion_enabled, observation_interval_s);
+                Board::GetInstance().RecordDiagnostic(
+                    "companion_defaults", "vad",
+                    companion_enabled ? "observation/actions enabled; torque unchanged"
+                                      : "unavailable");
+            }
             Status(manual_ ? "listening_manual" : "listening_vad");
         } else if (w->text == "@finish") {
             if (manual_ && had_audio_) {

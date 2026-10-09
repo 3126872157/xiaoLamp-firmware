@@ -808,6 +808,8 @@ bool LampHardwareExecutor::Play(const lamp::pose::Plan& plan, uint32_t token) {
 }
 void LampHardwareExecutor::RecordDiagnostic(const std::string& kind, const std::string& name,
                                             const std::string& data) {
+    if (kind == "attention")
+        ESP_LOGW("LampRuntime", "%s: %s", name.c_str(), data.substr(0, 512).c_str());
     std::lock_guard lock(diagnostic_mutex_);
     CJsonUniquePtr event(cJSON_CreateObject());
     cJSON_AddNumberToObject(event.get(), "sequence", ++diagnostic_sequence_);
@@ -1068,6 +1070,9 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
             plan.limited = true;
         }
         if (!plan.ok || !std::isfinite(plan.Duration()) || plan.requires_light) {
+            RecordDiagnostic("attention", "特别关注/运动预检拒绝",
+                             "request=" + id + "; mode=" + std::to_string(mode) + "; step=" +
+                                 lamp::Encode(semantic.get()) + "; reason=" + plan.error);
             reject(plan.requires_light ? "This preset requires a physical light driver"
                                        : plan.error);
             return;
@@ -1084,6 +1089,14 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
                 return;
             }
         }
+        RecordDiagnostic("motion_plan", id,
+                         "step=" + lamp::Encode(semantic.get()) +
+                             "; scale=" + std::to_string(plan.scale) +
+                             "; limited=" + (plan.limited ? "true" : "false") +
+                             "; duration_sec=" + std::to_string(plan.Duration()));
+        if (plan.scale < .25)
+            RecordDiagnostic("attention", "特别关注/动作幅度被压缩",
+                             "request=" + id + "; scale=" + std::to_string(plan.scale));
         duration += plan.Duration();
         if (duration > 60) {
             reject("Group exceeds 60 seconds");

@@ -109,6 +109,20 @@ private:
     std::string expression_task_, expression_failure_;
     uint64_t expression_motion_turn_ = 0;
     bool failure_notification_ = false;
+    enum class SilentPhase { Idle, Configure, Model, Restore };
+    std::atomic<SilentPhase> silent_phase_{SilentPhase::Idle};
+    int64_t silent_deadline_ = 0;
+    bool companion_default_applied_ = false, response_motion_tool_ = false,
+         response_audio_suppressed_ = false;
+    bool SilentEvent(const cJSON* event, const std::string& type);
+    void DiagnoseResponse();
+    std::map<std::string, std::string> user_transcripts_;
+    std::string latest_input_item_, turn_input_item_;
+    std::future<std::string> fallback_prepare_;
+    std::string fallback_skill_;
+    bool fallback_silent_ = false;
+    std::pair<std::string, bool> ExplicitExpression() const;
+    void PrepareFallback();
     void PollExpression();
     void CompleteTools();
     bool AppendImage();
@@ -133,6 +147,7 @@ private:
     bool QuietPacket(const std::string& pcm) const;
     bool Enqueue(Work* work);
     bool Write(const std::string& text);
+    bool AppendPcm(const std::string& pcm);
     void Run();
     void Connect();
     void Disconnect(bool notify = true);
