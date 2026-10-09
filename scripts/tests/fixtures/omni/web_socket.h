@@ -5,10 +5,11 @@
 class WebSocket {
 public:
     std::vector<std::string> sent;
-    bool IsConnected() const { return true; }
+    bool connected = true, send_ok = true;
+    bool IsConnected() const { return connected; }
     bool Send(const std::string& s) {
         sent.push_back(s);
-        return true;
+        return send_ok;
     }
     bool Connect(const char*) { return true; }
     void SetHeader(const char*, const char*) {}

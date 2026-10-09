@@ -11,7 +11,8 @@ struct Executor : LampActionExecutor {
     std::string State() override {
         return "{\"available\":" + std::string(online ? "true" : "false") +
                ",\"mode\":\"stand\",\"busy\":false,\"motion_enabled\":" +
-               std::string(armed ? "true" : "false") + "}";
+               std::string(armed ? "true" : "false") +
+               ",\"manual_control\":" + std::string(manual ? "true" : "false") + "}";
     }
     std::string Inspect(const std::string&) override { return "{}"; }
     std::string Submit(const std::string& text) override {
@@ -104,20 +105,59 @@ int main() {
     executor.completed = true;
     runtime.Tick();
     assert(stand.get().find("\"execution_completed\":true") != std::string::npos);
+    executor.armed = false;
+    executor.online = false;
+    auto offline_mode = runtime.Submit("lamp_set_mode", R"({"mode":"stand"})", 9);
+    runtime.Tick();
+    assert(offline_mode.get().find("Cannot auto-enable") != std::string::npos);
+    executor.online = true;
+    executor.completed = false;
+    auto auto_mode = runtime.Submit("lamp_set_mode", R"({"mode":"stand"})", 10);
+    const auto before = executor.groups;
+    runtime.Tick();
+    assert(executor.groups == before &&
+           auto_mode.wait_for(std::chrono::seconds(0)) != std::future_status::ready);
+    executor.armed = true;
+    executor.completed = true;
+    runtime.Tick();  // Torque confirmed; dispatch the real mode change only now.
+    assert(executor.groups == before + 1);
+    runtime.Tick();
+    assert(auto_mode.get().find("execution_completed") != std::string::npos);
+    executor.armed = false;
+    executor.completed = false;
+    executor.failed = true;
+    const auto failed_before = executor.groups;
+    auto failed_enable = runtime.Submit("lamp_set_mode", R"({"mode":"stand"})", 11);
+    runtime.Tick();
+    assert(failed_enable.get().find("\"ok\":false") != std::string::npos &&
+           executor.groups == failed_before);
+    executor.failed = false;
+    executor.manual = true;
+    auto manual_mode = runtime.Submit("lamp_set_mode", R"({"mode":"stand"})", 12);
+    runtime.Tick();
+    assert(manual_mode.get().find("manual control") != std::string::npos);
+    executor.manual = false;
+    auto cancel_enable = runtime.Submit("lamp_set_mode", R"({"mode":"stand"})", 13);
+    runtime.Tick();
+    runtime.Cancel(13);
+    runtime.Tick();
+    assert(cancel_enable.get().find("cancelled") != std::string::npos &&
+           executor.groups == failed_before);
+    executor.armed = true;
     std::vector<std::future<std::string>> full;
     for (int i = 0; i < 64; i++)
-        full.push_back(runtime.Submit("lamp_get_state", "{}", 7));
-    auto overflow = runtime.Submit("lamp_get_state", "{}", 7);
+        full.push_back(runtime.Submit("lamp_get_state", "{}", 14));
+    auto overflow = runtime.Submit("lamp_get_state", "{}", 14);
     assert(overflow.get().find("queue") != std::string::npos);
-    auto stop = runtime.Submit("lamp_stop", "{}", 7);
+    auto stop = runtime.Submit("lamp_stop", "{}", 14);
     runtime.Tick();
-    assert(stop.get().find("true") != std::string::npos && executor.stops == 2);
+    assert(stop.get().find("true") != std::string::npos && executor.stops == 3);
     for (int i = 0; i < 64; i++)
         runtime.Tick();
     for (auto& f : full)
         assert(f.get().find("runtime") != std::string::npos);
     auto schemas = CJsonUniquePtr(cJSON_Parse(LampEdgeRuntime::Tools().c_str()));
-    assert(cJSON_IsArray(schemas.get()) && cJSON_GetArraySize(schemas.get()) == 8);
+    assert(cJSON_IsArray(schemas.get()) && cJSON_GetArraySize(schemas.get()) == 9);
     assert(LampEdgeRuntime::Tools().find("A10") == std::string::npos);
     std::cout << "PASS runtime: semantic bounds, ownership, disarmed rejection, one group, "
                  "cancellation, feedback, emergency reserve and catalog\n";

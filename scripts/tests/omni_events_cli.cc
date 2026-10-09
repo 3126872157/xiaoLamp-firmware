@@ -219,6 +219,24 @@ int main() {
     batch.CompleteTools();
     assert(order.size() == 2 && order[1] == "lamp_run_sequence" && !batch.awaiting_tools_);
     OmniSetRuntime({}, {}, "");
+    OmniRealtimeProtocol flaky;
+    flaky.socket_ = std::make_unique<WebSocket>();
+    flaky.ready_ = true;
+    flaky.socket_->send_ok = false;
+    assert(!flaky.Write(R"({"type":"response.create"})"));
+    assert(flaky.close_ && !flaky.ready_);
+    auto* stale_work = new OmniRealtimeProtocol::Work{"stale", true, false, flaky.epoch_};
+    assert(xQueueSend(flaky.queue_, &stale_work, 0) == pdTRUE);
+    flaky.Disconnect(false);
+    assert(!flaky.close_ && !flaky.socket_);
+    OmniRealtimeProtocol::Work* remaining = nullptr;
+    assert(xQueueReceive(flaky.queue_, &remaining, 0) != pdTRUE);
+    flaky.Connect();
+    flaky.Receive(R"({"type":"session.created","session":{"id":"fresh"}})");
+    flaky.Receive(R"({"type":"session.updated"})");
+    assert(flaky.ready_ && !flaky.close_);
+    assert(flaky.Write(R"({"type":"response.create"})"));
+    flaky.Disconnect(false);
     auto info = OmniPanel();
     assert(info.find("dummy-secret") == std::string::npos);
     std::cout << "PASS handshake, PCM, stale response, function output/dedup, cancel and corrupt "

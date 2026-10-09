@@ -265,7 +265,15 @@ void OmniRealtimeProtocol::SendAbortSpeaking(AbortReason reason) {
 }
 bool OmniRealtimeProtocol::Write(const std::string& s) {
     if (!socket_ || !socket_->IsConnected() || !socket_->Send(s)) {
-        Fail("Omni transport send failed");
+        auto event = Parse(s);
+        const auto type = Str(event.get(), "type");
+        Board::GetInstance().RecordDiagnostic(
+            "transport_send", type,
+            "bytes=" + std::to_string(s.size()) +
+                (!socket_                  ? "; no socket"
+                 : !socket_->IsConnected() ? "; disconnected socket"
+                                           : "; socket send returned false"));
+        Fail("Omni transport send failed; reopen conversation to create a fresh connection");
         return false;
     }
     return true;
@@ -292,10 +300,18 @@ std::string OmniRealtimeProtocol::Session(bool manual) {
                     "机械臂在线只由lamp_get_state的available=true判断，runtime_ready仅软件在运行。"
                     "mode是保存的动作参考，不代表实际姿态；pose_rad为空或available="
                     "false时姿态未知。"
-                    "动作必须调用工具，不能仅口头答应。站起用lamp_run_sequence的steps=[{action_id:"
-                    "set_mode,mode:stand}]。"
+                    "你是实际可执行的台灯：用户明确的运动、休息、结束聊天命令必须调用相应工具，纯口"
+                    "头承诺不算执行。"
+                    "站起来/"
+                    "站好=>lamp_set_mode({mode:stand})；坐下=>lamp_set_mode({mode:sit})；开始工作=>"
+                    "lamp_set_mode({mode:work})。"
+                    "你去休息/休息一下/"
+                    "睡吧=>lamp_rest({})，它负责坐下、卸力、关闭会话；绝不能仅说好的我去休息。"
+                    "拜拜/先不聊了=>lamp_end_conversation({})。用户自己休息或讨论休息，不控制台灯。"
                     "明确上力必须调用lamp_set_torque(enabled=true)，不得只口头说已经上力。"
-                    "未使能时报告不能运动并请用户明确使能，不自行上力。"
+                    "明确运动命令已授权必要的使能：lamp_set_mode/"
+                    "lamp_rest会自动处理；其他明确运动用lamp_run_sequence的enable_if_needed=true。"
+                    "普通聊天、自发表达、后台事件不能自动使能，enable_if_needed默认false。"
                     "只有execution_completed=true才能说已站起/"
                     "已到位；ok=false或failed必须如实报告原因。"
                     "accepted仅受理，不得声称已完成；运动授权和力矩不同，查询只在需"
@@ -304,8 +320,9 @@ std::string OmniRealtimeProtocol::Session(bool manual) {
                     "用A13，不用低头代替；缺标定如实说明。"
                     "用户明确说拜拜、结束聊天、先不聊了等广义告别时调用lamp_end_"
                     "conversation并简短告别；讨论告别或用户说自己休息不结束。"
-                    "明确让台灯去休息用lamp_rest，等待成功才告别。显式要求上力/"
-                    "别用力才用lamp_set_torque；普通唤醒和聊天不自动上力。"
+                    "lamp_rest等待真实成功才告别，不成功就说明失败并保留会话。单独明确要求上力/"
+                    "别用力调用lamp_set_torque。"
+                    "动作执行前只说准备执行，不能提前声称完成；用户明确命令优先于寒暄。"
                     "当前仅语义动作接入，尚无图像、陪伴或随语音同步动作，不得声称看"
                     "见画面或已实现同步。"));
         }
@@ -336,14 +353,20 @@ void OmniRealtimeProtocol::Connect() {
     }
     socket_->SetHeader("Authorization", key.c_str());
     std::fill(key.begin(), key.end(), '\0');
-    socket_->OnData([this](const char* data, size_t length, bool binary) {
+    const auto generation = epoch_.load();
+    socket_->OnData([this, generation](const char* data, size_t length, bool binary) {
+        if (generation != epoch_ || !running_)
+            return;
         if (binary || length > 32768) {
             overloaded_ = true;
             return;
         }
-        Enqueue(new Work{std::string(data, length), true, false, epoch_});
+        Enqueue(new Work{std::string(data, length), true, false, generation});
     });
-    socket_->OnDisconnected([this] { disconnected_ = true; });
+    socket_->OnDisconnected([this, generation] {
+        if (generation == epoch_)
+            disconnected_ = true;
+    });
     if (!socket_->Connect(url.c_str()))
         Fail("Omni connect failed: check region/workspace/key/network");
 }
@@ -368,6 +391,10 @@ void OmniRealtimeProtocol::Disconnect(bool notify) {
     // The TLS destructor waits for its receive task. Invalidate anything queued during shutdown.
     ++epoch_;
     disconnected_ = false;
+    Work* stale = nullptr;
+    while (queue_ && xQueueReceive(queue_, &stale, 0) == pdTRUE)
+        delete stale;
+    close_ = false;
     response_.clear();
     cancelled_response_.clear();
     transcript_.clear();
@@ -598,8 +625,9 @@ void OmniRealtimeProtocol::CompleteTools() {
                 tool.output =
                     R"({"ok":true,"status":"rest_pending","instruction":"Say one short goodbye; close after playback. No servo or torque change."})";
             } else if (stop_batch &&
-                       (tool.name == "lamp_run_sequence" || tool.name == "lamp_rest" ||
-                        tool.name == "lamp_record_calibration" || tool.name == "lamp_set_torque")) {
+                       (tool.name == "lamp_run_sequence" || tool.name == "lamp_set_mode" ||
+                        tool.name == "lamp_rest" || tool.name == "lamp_record_calibration" ||
+                        tool.name == "lamp_set_torque")) {
                 auto args = Parse(tool.arguments);
                 if (tool.name == "lamp_set_torque" &&
                     cJSON_IsFalse(cJSON_GetObjectItem(args.get(), "enabled")) && dispatch)

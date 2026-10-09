@@ -28,11 +28,13 @@ private:
         std::string name, args;
         uint64_t turn = 0;
         std::promise<std::string> result;
+        bool enable_checked = false;
     };
     struct Pending {
         Work* work;
         std::string task;
         int64_t deadline;
+        bool enabling = false;
     };
     LampActionExecutor& executor_;
     std::function<void(const std::string&, const std::string&, const std::string&)> diagnostic_;

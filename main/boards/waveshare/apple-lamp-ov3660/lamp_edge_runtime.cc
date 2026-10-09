@@ -46,7 +46,7 @@ bool Emergency(const std::string& name, const std::string& args) {
             cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(j.get(), "enabled")));
 }
 std::string Operation(const std::string& name) {
-    if (name == "lamp_run_sequence")
+    if (name == "lamp_run_sequence" || name == "lamp_set_mode")
         return "execute_group";
     if (name == "lamp_stop")
         return "cancel";
@@ -123,6 +123,29 @@ void LampEdgeRuntime::Process(Work* work) {
         Complete(work, Error("Unknown tool/invalid args; runtime owns context"));
         return;
     }
+    bool auto_enable = work->name == "lamp_set_mode" || work->name == "lamp_rest";
+    if (auto* flag = cJSON_GetObjectItemCaseSensitive(args.get(), "enable_if_needed")) {
+        if (operation != "execute_group" || !cJSON_IsBool(flag)) {
+            Complete(work, Error("enable_if_needed requires boolean motion intent"));
+            return;
+        }
+        auto_enable = cJSON_IsTrue(flag);
+        cJSON_DeleteItemFromObjectCaseSensitive(args.get(), "enable_if_needed");
+    }
+    if (work->name == "lamp_set_mode") {
+        if (cJSON_GetArraySize(args.get()) != 1 ||
+            !cJSON_IsString(cJSON_GetObjectItemCaseSensitive(args.get(), "mode"))) {
+            Complete(work, Error("lamp_set_mode accepts only mode"));
+            return;
+        }
+        const auto mode = lamp::Text(args.get(), "mode");
+        args = Json(cJSON_CreateObject(), cJSON_Delete);
+        auto* step = cJSON_CreateObject();
+        cJSON_AddStringToObject(step, "action_id", "set_mode");
+        cJSON_AddStringToObject(step, "mode", mode.c_str());
+        auto* steps = cJSON_AddArrayToObject(args.get(), "steps");
+        cJSON_AddItemToArray(steps, step);
+    }
     Json command(cJSON_CreateObject(), cJSON_Delete);
     const auto request = executor_.NewRequestId();
     cJSON_AddStringToObject(command.get(), "protocol_version", lamp::kProtocol);
@@ -152,6 +175,40 @@ void LampEdgeRuntime::Process(Work* work) {
     if (operation == "execute_group" && group_turn_ == work->turn) {
         Complete(work, Error("Only one motion group per turn"));
         return;
+    }
+    // Explicit mode/rest requests, or an explicit motion-intent flag, authorize enable.
+    // The same physical feedback and manual-ownership gates apply as a separate torque tool.
+    if (auto_enable && !work->enable_checked) {
+        work->enable_checked = true;
+        auto state = Parse(executor_.State());
+        if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(state.get(), "motion_enabled"))) {
+            if (!cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(state.get(), "available")) ||
+                cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(state.get(), "manual_control"))) {
+                Complete(work, Error("Cannot auto-enable: five-axis feedback unavailable or manual "
+                                     "control owns motion"));
+                return;
+            }
+            Json torque(cJSON_CreateObject(), cJSON_Delete);
+            cJSON_AddStringToObject(torque.get(), "protocol_version", lamp::kProtocol);
+            cJSON_AddStringToObject(torque.get(), "request_id", executor_.NewRequestId().c_str());
+            cJSON_AddStringToObject(torque.get(), "operation", "set_torque");
+            auto* enable = cJSON_AddObjectToObject(torque.get(), "args");
+            cJSON_AddBoolToObject(enable, "enabled", true);
+            const auto command = lamp::Encode(torque.get());
+            if (diagnostic_)
+                diagnostic_("runtime_request", "auto_enable_for_explicit_motion", command);
+            const auto output = executor_.Submit(command);
+            auto receipt = Parse(output);
+            const auto task = lamp::Text(Result(receipt.get()), "task_id");
+            if (!task.empty() &&
+                cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(receipt.get(), "ok"))) {
+                motion_task_ = task;
+                motion_turn_ = work->turn;
+                pending_.push_back({work, task, esp_timer_get_time() + 15000000, true});
+            } else
+                Complete(work, ToolResult(output));
+            return;
+        }
     }
     if (diagnostic_)
         diagnostic_("runtime_request", work->name, *checked);
@@ -195,6 +252,7 @@ void LampEdgeRuntime::Tick() {
         queued_bytes_ -= work->name.size() + work->args.size();
         Process(work);
     }
+    std::vector<Work*> enabled_requests;
     for (auto it = pending_.begin(); it != pending_.end();) {
         const bool cancelled = it->work->turn <= invalid_through_;
         const bool timeout = esp_timer_get_time() > it->deadline;
@@ -207,7 +265,7 @@ void LampEdgeRuntime::Tick() {
         mode_only = cJSON_GetArraySize(steps) == 1 &&
                     lamp::Text(cJSON_GetArrayItem(steps, 0), "action_id") == "set_mode";
         auto* total = cJSON_GetObjectItemCaseSensitive(Result(result.get()), "total_steps");
-        const bool started = it->work->name == "lamp_run_sequence" && !mode_only &&
+        const bool started = !it->enabling && it->work->name == "lamp_run_sequence" && !mode_only &&
                              status == "running" && cJSON_IsNumber(total) && total->valuedouble > 0;
         if (cancelled || timeout || started ||
             !cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(result.get(), "ok")) ||
@@ -215,14 +273,21 @@ void LampEdgeRuntime::Tick() {
             status == "cancelled") {
             if (timeout)
                 executor_.Submit(lamp::Query("cancel", executor_.NewRequestId(), it->task));
-            Complete(it->work,
-                     cancelled ? Error("Turn cancelled")
-                     : timeout ? Error("Control confirmation timed out; inspect hardware feedback")
-                               : ToolResult(output));
+            if (it->enabling && !cancelled && !timeout && status == "completed" &&
+                cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(result.get(), "ok"))) {
+                enabled_requests.push_back(it->work);
+            } else
+                Complete(it->work,
+                         cancelled ? Error("Turn cancelled")
+                         : timeout
+                             ? Error("Control confirmation timed out; inspect hardware feedback")
+                             : ToolResult(output));
             it = pending_.erase(it);
         } else
             ++it;
     }
+    for (auto* request : enabled_requests)
+        Process(request);
     auto state = executor_.State();
     std::lock_guard lock(state_mutex_);
     snapshot_ = std::move(state);
@@ -283,7 +348,17 @@ std::string LampEdgeRuntime::Tools() {
         object());
     add("lamp_end_conversation",
         "广义告别或停止聊天：简短告别播完退出监听，不坐下卸力。讨论告别不结束。", object());
-    add("lamp_rest", "明确让台灯休息：坐下，真实确认后卸力；成功后简短告别并结束对话。", object());
+    add("lamp_rest",
+        "用户说你去休息吧/休息一下/"
+        "睡吧时必须调用这个完整动作，不能仅回答：必要时使能，坐下并确认，卸力，成功后告别并停止监听"
+        "。用户说自己休息或讨论休息不调用。",
+        object());
+    add("lamp_set_mode",
+        "明确命令站起来/站好/坐下/"
+        "开始工作时调用，不能仅口头答应。必要时自动使能，再切换姿态并等待真实完成。保持yaw；不用于"
+        "无动作意图的聊天或后台表达。",
+        cJSON_Parse(
+            R"({"type":"object","additionalProperties":false,"properties":{"mode":{"type":"string","enum":["sit","stand","work"]}},"required":["mode"]})"));
     add("lamp_stop", "停止运动但保持支撑力矩，不自动补播。", object());
     add("lamp_get_task", "只有需要实际完成结果时查询任务，避免反复调用。",
         cJSON_Parse(
@@ -342,6 +417,10 @@ std::string LampEdgeRuntime::Tools() {
         }
     }
     cJSON_AddItemToObject(cJSON_GetObjectItem(schema.get(), "properties"), "steps", steps);
+    cJSON_AddItemToObject(
+        cJSON_GetObjectItem(schema.get(), "properties"), "enable_if_needed",
+        cJSON_Parse(
+            R"({"type":"boolean","description":"仅用户明确要求实际运动时true；自发表达/后台动作必须false，默认false。"})"));
     cJSON_AddItemToObject(schema.get(), "required", cJSON_Parse("[\"steps\"]"));
     add("lamp_run_sequence",
         "执行一个有限语义动作组。次数幅度用本地默认，点两下头只用一次A01。靠近用A13而非低头，缺标定"
