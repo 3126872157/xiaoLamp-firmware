@@ -595,6 +595,57 @@ int main() {
     OmniSetRuntime({}, {}, "");
     OmniSetStateReader({});
     OmniSetVision({});
+    OmniRealtimeProtocol retry;
+    retry.ready_ = true;
+    retry.manual_ = false;
+    retry.conversation_wanted_ = true;
+    companion_enabled = companion_actions = true;
+    retry.socket_ = std::make_unique<WebSocket>();
+    retry.socket_->send_ok = false;
+    assert(!retry.Write(R"({"type":"input_audio_buffer.append","audio":"AAAA"})"));
+    assert(retry.reconnect_pending_ && retry.reconnect_attempts_ == 1);
+    assert(retry.reconnect_companion_ && retry.reconnect_actions_);
+    retry.Disconnect(false);
+    assert(retry.expression_.args.empty() && retry.call_cache_.empty());
+    omni_test_time = retry.reconnect_at_;
+    retry.PollReconnect();
+    assert(retry.socket_ && retry.socket_->sent.empty() && retry.restoring_preferences_);
+    retry.Receive(R"({"type":"session.created","session":{"id":"fresh"}})");
+    retry.Receive(R"({"type":"session.updated"})");
+    assert(retry.ready_ && !retry.restoring_preferences_);
+    assert(retry.ShouldResumeListeningAfterReconnect());
+    // Application resumes its original mode only once, after a fresh session ACK.
+    retry.SendStartListening(kListeningModeAutoStop);
+    assert(retry.listen_requested_ == 2 && !retry.ShouldResumeListeningAfterReconnect());
+    retry.ScheduleReconnect();
+    assert(retry.reconnect_attempts_ == 2);
+    retry.reconnect_pending_ = false;
+    retry.ScheduleReconnect();
+    assert(retry.reconnect_attempts_ == 3);
+    retry.reconnect_pending_ = false;
+    retry.ScheduleReconnect();
+    assert(!retry.reconnect_pending_);
+    retry.reconnect_attempts_ = 0;
+    retry.ScheduleReconnect();
+    retry.CloseAudioChannel();
+    retry.PollReconnect();
+    assert(!retry.conversation_wanted_ && !retry.reconnect_pending_);
+    retry.resume_after_reconnect_ = true;
+    assert(!retry.ShouldResumeListeningAfterReconnect());
+    retry.conversation_wanted_ = true;
+    retry.rest_requested_ = true;
+    retry.ScheduleReconnect();
+    assert(!retry.reconnect_pending_ && !retry.ShouldResumeListeningAfterReconnect());
+    // Stable background energy should not permanently starve observation; an onset wins.
+    OmniRealtimeProtocol ambient;
+    std::string noise(1920, '\0');
+    for (size_t i = 0; i < noise.size(); i += 2) {
+        noise[i] = char(800 & 255);
+        noise[i + 1] = char(800 >> 8);
+    }
+    assert(ambient.BackgroundQuiet(noise));
+    std::string loud(1920, '\x7f');
+    assert(!ambient.BackgroundQuiet(loud));
     auto info = OmniPanel();
     assert(info.find("dummy-secret") == std::string::npos);
     std::cout << "PASS handshake, PCM, stale response, function output/dedup, cancel and corrupt "

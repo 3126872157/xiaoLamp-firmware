@@ -60,6 +60,9 @@ public:
     virtual bool Start() = 0;
     virtual bool UsesPcmAudio() const { return false; }
     virtual bool OpensAsynchronously() const { return false; }
+    // A recovered transport may resume an explicitly requested conversation from Idle.
+    // Default false preserves existing WebSocket/MQTT lifecycle behavior.
+    virtual bool ShouldResumeListeningAfterReconnect() const { return false; }
     virtual bool AcceptsPlayback(uint32_t) const { return true; }
     virtual void ReportPlaybackFailure(const std::string&) { CloseAudioChannel(); }
     virtual bool WantsConversationEnd() const { return false; }

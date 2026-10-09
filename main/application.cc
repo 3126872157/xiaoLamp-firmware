@@ -599,7 +599,10 @@ void Application::InitializeProtocol() {
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
         if (protocol_->OpensAsynchronously()) {
             Schedule([this] {
-                if (GetDeviceState() == kDeviceStateConnecting)
+                if (protocol_ && protocol_->IsAudioChannelOpened() &&
+                    (GetDeviceState() == kDeviceStateConnecting ||
+                     (GetDeviceState() == kDeviceStateIdle &&
+                      protocol_->ShouldResumeListeningAfterReconnect())))
                     SetListeningMode(pending_connect_mode_);
             });
         }

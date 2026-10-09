@@ -41,6 +41,9 @@ public:
     bool IsAudioChannelOpened() const override { return ready_; }
     bool UsesPcmAudio() const override { return true; }
     bool OpensAsynchronously() const override { return true; }
+    bool ShouldResumeListeningAfterReconnect() const override {
+        return resume_after_reconnect_ && conversation_wanted_ && ready_ && !rest_requested_;
+    }
     bool AcceptsPlayback(uint32_t id) const override {
         return running_ && ready_ && id && id == playback_;
     }
@@ -74,6 +77,19 @@ private:
     void RecoverAudioInput();
     SemaphoreHandle_t stopped_ = nullptr;
     bool task_started_ = false;
+    std::atomic<bool> conversation_wanted_{false};
+    std::atomic<bool> resume_after_reconnect_{false};
+    unsigned reconnect_attempts_ = 0;
+    int64_t reconnect_at_ = 0, ready_since_ = 0;
+    bool reconnect_pending_ = false;
+    bool reconnect_companion_ = false, reconnect_actions_ = false, restoring_preferences_ = false;
+    bool reconnect_preferences_valid_ = false;
+    void ScheduleReconnect();
+    void PollReconnect();
+    bool server_speech_active_ = false;
+    double noise_mean_ = 0;
+    bool BackgroundQuiet(const std::string& pcm);
+    void ObservationWait(const char* reason);
     std::unique_ptr<WebSocket> socket_;
     std::atomic<bool> ready_{false}, running_{true}, open_{false}, close_{false}, cancel_{false};
     std::atomic<bool> disconnected_{false}, overloaded_{false}, recording_{false};

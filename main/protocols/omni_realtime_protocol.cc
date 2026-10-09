@@ -27,6 +27,9 @@ std::function<bool(const OmniImage&)> image_valid;
 bool companion_enabled = false, companion_actions = false;
 bool transcription_enabled = false;
 unsigned observation_interval_s = 5;
+std::string observation_wait_reason;
+unsigned reconnect_attempts = 0;
+int64_t reconnect_wait_ms = 0;
 std::atomic<bool> observation_once{false}, observation_reset{false};
 std::string observation_status = "disabled", observation_error, observation_cache;
 int64_t observation_at = 0;
@@ -247,6 +250,9 @@ std::string OmniPanel(const std::string& request) {
     cJSON_AddBoolToObject(j.get(), "companion_enabled", companion_enabled);
     cJSON_AddBoolToObject(j.get(), "companion_actions", companion_actions);
     cJSON_AddBoolToObject(j.get(), "transcription_enabled", transcription_enabled);
+    cJSON_AddStringToObject(j.get(), "observation_wait_reason", observation_wait_reason.c_str());
+    cJSON_AddNumberToObject(j.get(), "reconnect_attempts", reconnect_attempts);
+    cJSON_AddNumberToObject(j.get(), "reconnect_wait_ms", reconnect_wait_ms);
     cJSON_AddNumberToObject(j.get(), "observation_interval_s", observation_interval_s);
     cJSON_AddStringToObject(j.get(), "observation_status", observation_status.c_str());
     cJSON_AddStringToObject(j.get(), "observation_error", observation_error.c_str());
@@ -334,12 +340,20 @@ bool OmniRealtimeProtocol::OpenAudioChannel() {
         SetError("Configure Bailian credentials in the device web panel");
         return false;
     }
+    conversation_wanted_ = true;
+    resume_after_reconnect_ = false;
+    reconnect_pending_ = false;
+    reconnect_attempts_ = 0;
+    reconnect_preferences_valid_ = false;
     in_use = true;
     open_ = true;
     status = "connecting";
     return true;
 }
 void OmniRealtimeProtocol::CloseAudioChannel(bool) {
+    conversation_wanted_ = false;
+    resume_after_reconnect_ = false;
+    reconnect_pending_ = false;
     {
         std::lock_guard lock(config_mutex);
         if (runtime_cancel && turn_)
@@ -374,6 +388,7 @@ bool OmniRealtimeProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> p) {
                  true, epoch_});
 }
 void OmniRealtimeProtocol::SendStartListening(ListeningMode mode) {
+    resume_after_reconnect_ = false;
     listen_requested_ = mode == kListeningModeManualStop ? 1 : 2;
 }
 void OmniRealtimeProtocol::SendStopListening() {
@@ -381,6 +396,9 @@ void OmniRealtimeProtocol::SendStopListening() {
     finish_requested_ = true;
 }
 void OmniRealtimeProtocol::SendAbortSpeaking(AbortReason reason) {
+    conversation_wanted_ = false;
+    resume_after_reconnect_ = false;
+    reconnect_pending_ = false;
     {
         std::lock_guard lock(config_mutex);
         if (runtime_cancel && turn_)
@@ -440,7 +458,10 @@ bool OmniRealtimeProtocol::Write(const std::string& s) {
     Board::GetInstance().RecordDiagnostic("attention", "特别关注/通信失败取消动作",
                                           "event=" + Str(event.get(), "type") + "; turn=" +
                                               std::to_string(turn_) + "; task=" + expression_task_);
-    Fail("Omni transport send failed; reopen conversation to create a fresh connection");
+    ScheduleReconnect();
+    Fail(reconnect_pending_
+             ? "Omni transport send failed; fresh connection retry scheduled"
+             : "Omni transport send failed; retry budget exhausted or session ended");
     return false;
 }
 
@@ -449,6 +470,8 @@ void OmniRealtimeProtocol::Fail(const char* message) {
     Status("failed", message);
     close_ = true;
     SetError(message);  // Never include provider payloads, headers or keys in diagnostics.
+    if (!reconnect_pending_)
+        conversation_wanted_ = false;
     Board::GetInstance().RecordDiagnostic("voice_error", "omni", message);
 }
 std::string OmniRealtimeProtocol::Session(bool manual, bool include_audio) {
@@ -519,6 +542,7 @@ std::string OmniRealtimeProtocol::Session(bool manual, bool include_audio) {
 }
 void OmniRealtimeProtocol::Connect() {
     Disconnect(false);
+    error_occurred_ = false;
     in_use = true;
     std::string url, key;
     {
@@ -551,8 +575,10 @@ void OmniRealtimeProtocol::Connect() {
         if (generation == epoch_)
             disconnected_ = true;
     });
-    if (!socket_->Connect(url.c_str()))
+    if (!socket_->Connect(url.c_str())) {
+        ScheduleReconnect();
         Fail("Omni connect failed: check region/workspace/key/network");
+    }
 }
 void OmniRealtimeProtocol::Disconnect(bool notify) {
     {
@@ -582,6 +608,8 @@ void OmniRealtimeProtocol::Disconnect(bool notify) {
     speech_prefill_.clear();
     observation_deadline_ = sample_deadline_ = quiet_since_ = observation_retry_at_ = 0;
     observation_turn_ = 0;
+    server_speech_active_ = false;
+    noise_mean_ = 0;
     observed_frame_ = 0;
     have_luminance_ = false;
     model_commit_pending_ = sample_sent_ = false;
@@ -646,7 +674,8 @@ void OmniRealtimeProtocol::Disconnect(bool notify) {
         on_disconnected_();
     if (notify) {
         std::lock_guard lock(config_mutex);
-        if (status != "failed" && status != "cancelled" && status != "resting")
+        if (status != "failed" && status != "cancelled" && status != "resting" &&
+            status != "reconnecting")
             status = "disconnected";
     }
 }
@@ -684,6 +713,12 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
                                               Str(cJSON_GetObjectItem(j.get(), "error"), "code"));
         return;
     }
+    if (type == "input_audio_buffer.speech_started")
+        server_speech_active_ = true;
+    if (type == "input_audio_buffer.speech_stopped") {
+        server_speech_active_ = false;
+        quiet_since_ = esp_timer_get_time();
+    }
     if (SilentEvent(j.get(), type))
         return;
     if (ObservationEvent(j.get(), type))
@@ -695,6 +730,11 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
         Write(Session(true));
     } else if (type == "session.updated" && !ready_) {
         ready_ = true;
+        ready_since_ = esp_timer_get_time();
+        if (restoring_preferences_) {
+            restoring_preferences_ = false;
+            resume_after_reconnect_ = true;
+        }
         connecting_since_ = 0;
         Status("ready");
         if (on_connected_)
@@ -718,6 +758,7 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
         if (id.empty() || id == cancelled_response_)
             return;
         response_ = id;
+        server_speech_active_ = false;
         if (awaiting_tools_) {
             std::lock_guard lock(config_mutex);
             if (runtime_cancel && turn_)
@@ -1392,20 +1433,46 @@ void OmniRealtimeProtocol::PollObservation() {
         interval = observation_interval_s;
     }
     const bool once = observation_once.load();
-    if (now < observation_retry_at_ || observation_attempts_ >= 2 || (!enabled && !once) ||
-        manual_ || !recording_ || !response_.empty() || awaiting_tools_ || speaking_ ||
-        !quiet_since_ || now - quiet_since_ < 2500000 || background_task_.valid() ||
-        !expression_.args.empty() || expression_result_.valid() || !expression_task_.empty() ||
-        !expression_failure_.empty() || failure_notification_ || silent_phase_ != SilentPhase::Idle)
+    const char* wait = nullptr;
+    if (!enabled && !once)
+        wait = "disabled";
+    else if (manual_)
+        wait = "manual_recording";
+    else if (!recording_)
+        wait = "microphone_not_recording";
+    else if (!response_.empty() || awaiting_tools_ || speaking_)
+        wait = "foreground_response";
+    else if (server_speech_active_)
+        wait = "server_vad_speech";
+    else if (!quiet_since_ || now - quiet_since_ < 2500000)
+        wait = "microphone_not_quiet";
+    else if (now < observation_retry_at_)
+        wait = "result_retry_backoff";
+    else if (observation_attempts_ >= 2)
+        wait = "protocol_failure_pause";
+    else if (background_task_.valid() || !expression_.args.empty() || expression_result_.valid() ||
+             !expression_task_.empty())
+        wait = "motion_pending";
+    else if (!expression_failure_.empty() || failure_notification_ ||
+             silent_phase_ != SilentPhase::Idle)
+        wait = "turn_cleanup";
+    if (wait) {
+        ObservationWait(wait);
         return;
+    }
+    ObservationWait("eligible");
     auto frame = reader ? reader() : nullptr;
     if (!frame || frame->frame_id == observed_frame_ ||
-        now - frame->captured_at_us > int64_t(interval) * 2000000)
+        now - frame->captured_at_us > int64_t(interval) * 2000000) {
+        ObservationWait("waiting_for_fresh_camera_frame");
         return;
+    }
     auto hardware = Parse(state ? state() : "{}");
     if (cJSON_IsTrue(cJSON_GetObjectItem(hardware.get(), "busy")) ||
-        cJSON_IsTrue(cJSON_GetObjectItem(hardware.get(), "manual_control")))
+        cJSON_IsTrue(cJSON_GetObjectItem(hardware.get(), "manual_control"))) {
+        ObservationWait("hardware_busy_or_manual_control");
         return;
+    }
     if (!once && have_luminance_ && frame->luminance_valid) {
         int mean = 0;
         for (size_t i = 0; i < 192; i++)
@@ -1417,6 +1484,7 @@ void OmniRealtimeProtocol::PollObservation() {
         if (change / 192 < 12 && observation_at &&
             now - observation_at < int64_t(interval) * 2000000) {
             observed_frame_ = frame->frame_id;
+            ObservationWait("unchanged_scene_cache_still_fresh");
             return;
         }
     }
@@ -1795,6 +1863,76 @@ bool OmniRealtimeProtocol::SilentEvent(const cJSON* j, const std::string& type) 
     return type.starts_with("response.") || type == "input_audio_buffer.committed" ||
            type == "input_audio_buffer.speech_started";
 }
+void OmniRealtimeProtocol::ObservationWait(const char* reason) {
+    std::lock_guard lock(config_mutex);
+    if (observation_wait_reason != reason) {
+        observation_wait_reason = reason;
+        Board::GetInstance().RecordDiagnostic("observation_wait", reason,
+                                              "No hidden mode/torque change");
+    }
+}
+bool OmniRealtimeProtocol::BackgroundQuiet(const std::string& pcm) {
+    if (pcm.empty() || pcm.size() % 2)
+        return true;
+    double mean = 0;
+    for (size_t i = 0; i < pcm.size(); i += 2)
+        mean +=
+            std::abs(int(int16_t(uint16_t(uint8_t(pcm[i])) | uint16_t(uint8_t(pcm[i + 1])) << 8)));
+    mean /= pcm.size() / 2;
+    if (!noise_mean_)
+        noise_mean_ = std::min(mean, 2000.);
+    const bool quiet = mean < std::max(500., noise_mean_ * 1.8 + 200.);
+    if (!server_speech_active_ && response_.empty() && quiet)
+        noise_mean_ = .98 * noise_mean_ + .02 * std::min(mean, noise_mean_ * 1.01 + 50.);
+    return quiet && !server_speech_active_;
+}
+void OmniRealtimeProtocol::ScheduleReconnect() {
+    if (!conversation_wanted_ || rest_requested_ || cancel_ || !running_ || reconnect_pending_)
+        return;
+    if (reconnect_attempts_ >= 3)
+        return;
+    static constexpr int delays[] = {2, 5, 10};
+    reconnect_at_ = esp_timer_get_time() + int64_t(delays[reconnect_attempts_++]) * 1000000;
+    reconnect_pending_ = true;
+    {
+        std::lock_guard lock(config_mutex);
+        if (!restoring_preferences_) {
+            reconnect_companion_ = companion_enabled;
+            reconnect_actions_ = companion_actions;
+            reconnect_preferences_valid_ = companion_default_applied_;
+        }
+        reconnect_attempts = reconnect_attempts_;
+    }
+    Board::GetInstance().RecordDiagnostic(
+        "connection_retry", "scheduled",
+        "attempt=" + std::to_string(reconnect_attempts_) +
+            "; fresh socket; old utterance/motion never replayed");
+}
+void OmniRealtimeProtocol::PollReconnect() {
+    const auto now = esp_timer_get_time();
+    if (ready_ && ready_since_ && now - ready_since_ >= 60000000) {
+        reconnect_attempts_ = 0;
+        ready_since_ = 0;
+    }
+    if (!reconnect_pending_)
+        return;
+    if (!conversation_wanted_ || rest_requested_ || cancel_ || !running_) {
+        reconnect_pending_ = false;
+        std::lock_guard lock(config_mutex);
+        reconnect_wait_ms = 0;
+        return;
+    }
+    {
+        std::lock_guard lock(config_mutex);
+        reconnect_wait_ms = std::max(int64_t(0), (reconnect_at_ - now) / 1000);
+        status = "reconnecting";
+    }
+    if (now < reconnect_at_)
+        return;
+    reconnect_pending_ = false;
+    restoring_preferences_ = true;
+    Connect();
+}
 void OmniRealtimeProtocol::RecoverAudioInput() {
     if (!audio_overrun_.exchange(false))
         return;
@@ -1823,14 +1961,22 @@ void OmniRealtimeProtocol::Run() {
         PollObservation();
         if (awaiting_tools_ && ready_ && !close_ && !cancel_)
             CompleteTools();
-        if (close_.exchange(false) || disconnected_.exchange(false))
+        const bool peer_closed = disconnected_.exchange(false);
+        if (peer_closed && !close_ && !rest_requested_ && conversation_wanted_) {
+            ScheduleReconnect();
+            Fail("Omni connection closed unexpectedly");
+        }
+        if (close_.exchange(false) || peer_closed)
             Disconnect();
+        PollReconnect();
         if (overloaded_.exchange(false))
             Fail("Omni queue overflow; session stopped");
         if (open_.exchange(false))
             Connect();
-        if (connecting_since_ && esp_timer_get_time() - connecting_since_ > 20000000)
+        if (connecting_since_ && esp_timer_get_time() - connecting_since_ > 20000000) {
+            ScheduleReconnect();
             Fail("Omni session handshake timed out");
+        }
         if (manual_ && recording_ && recording_since_ &&
             esp_timer_get_time() - recording_since_ > 30000000)
             Fail("Manual recording exceeded 30 seconds; start a new turn");
@@ -1874,7 +2020,7 @@ void OmniRealtimeProtocol::Run() {
         if (!ready_)
             continue;
         if (w->audio) {
-            const bool quiet = QuietPacket(w->text);
+            const bool quiet = BackgroundQuiet(w->text);
             if (audio_recovering_) {
                 const auto now = esp_timer_get_time();
                 if (!quiet)
@@ -1939,8 +2085,10 @@ void OmniRealtimeProtocol::Run() {
             if (!manual_ && !companion_default_applied_) {
                 std::lock_guard lock(config_mutex);
                 companion_default_applied_ = true;
-                companion_enabled = bool(image_reader) && bool(runtime_dispatch);
-                companion_actions = companion_enabled;
+                companion_enabled = bool(image_reader) && bool(runtime_dispatch) &&
+                                    (!reconnect_preferences_valid_ || reconnect_companion_);
+                companion_actions =
+                    companion_enabled && (!reconnect_preferences_valid_ || reconnect_actions_);
                 if (vision_periodic)
                     vision_periodic(companion_enabled, observation_interval_s);
                 Board::GetInstance().RecordDiagnostic(
