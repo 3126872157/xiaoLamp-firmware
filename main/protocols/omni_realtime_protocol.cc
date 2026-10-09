@@ -1745,6 +1745,9 @@ std::pair<std::string, bool> OmniRealtimeProtocol::ExplicitExpression() const {
     if (turn_input_item_.empty() || found == user_transcripts_.end())
         return {};
     const auto& text = found->second;
+    for (const auto* discussion : {"什么意思", "是什么", "为什么", "原理", "介绍", "解释"})
+        if (text.find(discussion) != std::string::npos)
+            return {};
     for (const auto* denied :
          {"不要点", "不点头", "别点", "不用点", "不要摇", "别摇", "只说话", "不要动", "别动",
           "不做动作", "不要低头", "不低头", "别低头", "不要歪", "别歪", "不歪头", "不要摆", "别摆"})
@@ -1753,9 +1756,14 @@ std::pair<std::string, bool> OmniRealtimeProtocol::ExplicitExpression() const {
     const bool silent =
         text.find("不要说话") != std::string::npos || text.find("不说话") != std::string::npos ||
         text.find("只动") != std::string::npos || text.find("安静") != std::string::npos;
-    const bool combined = text.find("边说") != std::string::npos ||
-                          text.find("一边") != std::string::npos ||
-                          text.find("同时") != std::string::npos;
+    const bool combined =
+        text.find("边说") != std::string::npos || text.find("一边") != std::string::npos ||
+        text.find("同时") != std::string::npos ||
+        (text.find("边") != std::string::npos && text.find("话") != std::string::npos);
+    const bool command = text.starts_with("来吧") || text.starts_with("请") ||
+                         text.starts_with("帮我") || text.starts_with("给我") ||
+                         text.starts_with("我希望你") || text.starts_with("我想让你") ||
+                         text.starts_with("调用工具");
     for (const auto& entry : {std::pair{"点头", "A01"},
                               {"点点头", "A01"},
                               {"点一下头", "A01"},
@@ -1764,7 +1772,9 @@ std::pair<std::string, bool> OmniRealtimeProtocol::ExplicitExpression() const {
                               {"点四下头", "A01"},
                               {"点五下头", "A01"},
                               {"点两次头", "A01"},
+                              {"点三次头", "A01"},
                               {"点四次头", "A01"},
+                              {"点五次头", "A01"},
                               {"摇头", "B01"},
                               {"摇下头", "B01"},
                               {"摇一下头", "B01"},
@@ -1774,7 +1784,7 @@ std::pair<std::string, bool> OmniRealtimeProtocol::ExplicitExpression() const {
                               {"摆动", "A02"}}) {
         if (text.find(entry.first) == std::string::npos)
             continue;
-        if (silent || combined || text.starts_with(entry.first) ||
+        if (silent || combined || command || text.starts_with(entry.first) ||
             text.starts_with(std::string("请") + entry.first) ||
             text.starts_with(std::string("你") + entry.first))
             return {entry.second, silent};

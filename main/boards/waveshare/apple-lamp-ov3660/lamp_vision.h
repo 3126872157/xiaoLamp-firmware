@@ -44,7 +44,7 @@ public:
                                     self->CaptureWait("hardware_busy_or_manual");
                                 else if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < 24576 ||
                                          heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) <
-                                             8192 ||
+                                             4096 ||
                                          heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < 131072)
                                     self->CaptureWait("memory_reserve");
                                 else {
@@ -87,7 +87,7 @@ public:
         cJSON_AddNumberToObject(j.get(), "interval_s", interval_s_);
         cJSON_AddStringToObject(j.get(), "capture_wait_reason", capture_wait_reason_.c_str());
         cJSON_AddNumberToObject(j.get(), "required_internal_free_bytes", 24576);
-        cJSON_AddNumberToObject(j.get(), "required_internal_largest_block", 8192);
+        cJSON_AddNumberToObject(j.get(), "required_internal_largest_block", 4096);
         cJSON_AddNumberToObject(j.get(), "capture_duration_ms", duration_ms_);
         cJSON_AddNumberToObject(j.get(), "capture_min_internal_bytes", capture_min_internal_);
         cJSON_AddNumberToObject(j.get(), "internal_free_bytes",
@@ -120,6 +120,13 @@ private:
             capture_wait_reason_ = reason;
         }
         executor_.RecordDiagnostic("camera_wait", reason, "Capture budget/control gate");
+        if (std::string(reason) == "memory_reserve")
+            executor_.RecordDiagnostic(
+                "attention", "特别关注/周期拍摄暂停",
+                "Memory reserve; internal_free=" +
+                    std::to_string(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)) +
+                    "; largest_block=" +
+                    std::to_string(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
     }
     Camera* camera_;
     LampHardwareExecutor& executor_;

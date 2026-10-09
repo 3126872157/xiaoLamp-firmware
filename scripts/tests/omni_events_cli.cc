@@ -571,6 +571,13 @@ int main() {
     assert(silent.ExplicitExpression().first == "A01" && silent.ExplicitNodRepetitions() == 0);
     silent.user_transcripts_["u1"] = "一边说话一边点头，头点四次";
     assert(silent.ExplicitExpression().first == "A01" && silent.ExplicitNodRepetitions() == 4);
+    for (const auto* phrase :
+         {"边点四次头，话说长一点", "来吧，点四下头", "我希望你调用工具去点四下头"}) {
+        silent.user_transcripts_["u1"] = phrase;
+        assert(silent.ExplicitExpression().first == "A01" && silent.ExplicitNodRepetitions() == 4);
+    }
+    silent.user_transcripts_["u1"] = "请解释点四下头是什么意思";
+    assert(silent.ExplicitExpression().first.empty());
     silent.user_transcripts_["u1"] = "不要点四下头，只说话";
     assert(silent.ExplicitExpression().first.empty());
     silent.user_transcripts_["u1"] = "点头不要说话";
