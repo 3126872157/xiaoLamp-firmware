@@ -374,6 +374,19 @@ int main() {
     assert(observer.had_audio_ && observer.speech_prefill_.empty());
     assert(observer.QuietPacket(std::string(1920, '\0')));
     assert(!observer.QuietPacket(std::string(1920, '\x7f')));
+    // A global illumination shift alone does not spend another cloud request.
+    observation_once = false;
+    observer.have_luminance_ = true;
+    observer.observed_luminance_.fill(20);
+    photo->luminance.fill(40);
+    photo->captured_at_us = omni_test_time;
+    photo->frame_id++;
+    observer.PollObservation();
+    assert(observer.observation_phase_ == OmniRealtimeProtocol::ObservationPhase::Idle);
+    // Two errors pause the experimental lane rather than repeatedly damaging foreground chat.
+    observer.observation_attempts_ = 2;
+    observer.PollObservation();
+    assert(!companion_enabled && observation_status == "paused_after_two_failures");
     observer.Disconnect(false);
     assert(!companion_enabled && observation_cache.empty());
     OmniSetRuntime({}, {}, "");

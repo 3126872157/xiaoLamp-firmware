@@ -65,6 +65,14 @@ std::string Dump(const cJSON* j) {
     cJSON_free(p);
     return s;
 }
+void PauseCompanion() {
+    std::lock_guard lock(config_mutex);
+    companion_enabled = companion_actions = false;
+    observation_once = false;
+    observation_status = "disabled";
+    if (vision_periodic)
+        vision_periodic(false, observation_interval_s);
+}
 void Status(const char* s, const char* e = "", const char* reason = nullptr) {
     std::lock_guard lock(config_mutex);
     status = s;
@@ -474,7 +482,8 @@ void OmniRealtimeProtocol::Disconnect(bool notify) {
     observation_response_.clear();
     observation_text_.clear();
     speech_prefill_.clear();
-    observation_deadline_ = sample_deadline_ = 0;
+    observation_deadline_ = sample_deadline_ = quiet_since_ = 0;
+    observation_turn_ = 0;
     observed_frame_ = 0;
     have_luminance_ = false;
     model_commit_pending_ = sample_sent_ = false;
@@ -486,6 +495,7 @@ void OmniRealtimeProtocol::Disconnect(bool notify) {
         observation_once = false;
         observation_cache.clear();
         observation_at = 0;
+        observation_cached_frame = 0;
         observation_status = "disabled";
         if (vision_periodic)
             vision_periodic(false, observation_interval_s);
@@ -723,6 +733,7 @@ void OmniRealtimeProtocol::CompleteTools() {
             if (tool.name == "lamp_end_conversation" &&
                 omni::ToolArguments(tool.name, tool.arguments)) {
                 rest_requested_ = true;
+                PauseCompanion();
                 recording_ = false;
                 tool.output =
                     R"({"ok":true,"status":"rest_pending","instruction":"Say one short goodbye; close after playback. No servo or torque change."})";
@@ -759,12 +770,21 @@ void OmniRealtimeProtocol::CompleteTools() {
                 break;  // Preserve dependencies: explicit enable must finish before a later motion.
             }
             tool.output = tool.result.get();
+            auto confirmed = Parse(tool.output);
+            auto args = Parse(tool.arguments);
+            if (cJSON_IsTrue(cJSON_GetObjectItem(confirmed.get(), "ok")) &&
+                (tool.name == "lamp_stop" ||
+                 (tool.name == "lamp_set_torque" &&
+                  cJSON_IsFalse(cJSON_GetObjectItem(args.get(), "enabled")))))
+                PauseCompanion();
             if (tool.name == "lamp_rest") {
                 auto j = Parse(tool.output);
                 auto* result = cJSON_GetObjectItem(j.get(), "result");
                 if (cJSON_IsTrue(cJSON_GetObjectItem(j.get(), "ok")) &&
-                    Str(result, "status") == "completed")
+                    Str(result, "status") == "completed") {
                     rest_requested_ = true;
+                    PauseCompanion();
+                }
             }
         }
     }
@@ -863,6 +883,12 @@ void OmniRealtimeProtocol::RestoreForeground(const char* reason, bool voice) {
     observation_phase_ = ObservationPhase::Restore;
     restoring_for_voice_ = voice;
     model_commit_pending_ = false;
+    if (!voice && std::string(reason) != "completed" &&
+        std::string(reason) != "companion_disabled") {
+        std::lock_guard lock(config_mutex);
+        if (observation_error.empty())
+            observation_error = reason;
+    }
     if (voice) {
         std::function<void(uint64_t)> cancel;
         {
@@ -1277,8 +1303,12 @@ void OmniRealtimeProtocol::Run() {
             } else if (!quiet_since_)
                 quiet_since_ = esp_timer_get_time();
             if (observation_phase_ == ObservationPhase::Restore) {
-                if (restoring_for_voice_ && speech_prefill_.size() + w->text.size() <= 32768)
-                    speech_prefill_ += w->text;
+                if (restoring_for_voice_) {
+                    if (speech_prefill_.size() + w->text.size() > 32768) {
+                        Fail("Foreground audio exceeded bounded restore buffer; restart this turn");
+                    } else
+                        speech_prefill_ += w->text;
+                }
                 continue;
             }
             if (observation_phase_ == ObservationPhase::Configure ||
