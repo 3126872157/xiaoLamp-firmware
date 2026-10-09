@@ -8,14 +8,14 @@ const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH 
 try {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   const errors = [], operations = [];
-  let edge = false, frame = 0;
+  let edge = false, frame = 0, companion = false;
   page.on('pageerror', e => errors.push(e.message));
   await page.route('http://omni.test/**', async route => {
     const r = route.request();
     if (r.url().endsWith('/api/lamp/omni')) {
       assert.equal(r.headers()['x-lamp-token'], 'test-token');
-      if (r.method() === 'POST') operations.push(r.postDataJSON());
-      await route.fulfill({ json: { ok: true, configured: operations.length > 0, status: 'configured', cloud_motion_enabled: edge, manual_image_supported: edge } });
+      if (r.method() === 'POST') {const body=r.postDataJSON();operations.push(body);if(body.op==='companion')companion=body.enabled;}
+      await route.fulfill({ json: { ok: true, configured: operations.length > 0, status: 'configured', cloud_motion_enabled: edge, manual_image_supported: edge, companion_enabled:companion } });
     } else if (r.url().endsWith('/api/lamp/vision/jpeg')) {
       assert.equal(r.headers()['x-lamp-token'], 'test-token');
       assert.equal(new URL(r.url()).search, '');
@@ -57,6 +57,10 @@ try {
   await page.locator('#companion-start').click();
   await page.waitForFunction(()=>!document.querySelector('#companion-start').disabled);
   assert.deepEqual(operations.at(-1),{op:'companion',enabled:true,actions:false,interval_s:10});
+  await page.locator('#companion-actions').check();
+  await page.waitForFunction(()=>document.querySelector('#omni-status').textContent.includes('configured'));
+  await new Promise(r=>setTimeout(r,100));
+  assert.equal(operations.at(-1).actions,true);
   await page.locator('#companion-stop').click();
   await page.waitForFunction(()=>!document.querySelector('#companion-stop').disabled);
   assert.equal(operations.at(-1).enabled,false);

@@ -16,14 +16,14 @@ inline constexpr const char* kLampOmniPage = R"omnipage(
 <details><summary>陪伴观察 · 阶段四（实验）</summary>
 <p>关闭手动附图，开启 VAD 后使用。每个节拍只检查最新画面，有变化才上传；观察正文不朗读。开始说话优先恢复对话。结束会话会关闭陪伴。</p>
 <label>采集间隔（秒） <input id="companion-interval" type="number" min="2" max="30" step="1" value="5"></label>
-<label><input id="companion-actions" type="checkbox">允许轻量陪伴动作（默认关闭；须已使能、退出手动控制；工作中不抢占）</label>
+<label><input id="companion-actions" type="checkbox">允许轻量陪伴动作（默认关闭；须已使能、退出手动控制；忙于工作不抢占）</label>
 <div class="buttons"><button id="observe-once">拍照并观察一次</button><button id="companion-start">开启陪伴观察</button><button id="companion-stop">关闭陪伴观察</button></div>
-<p>同连接观察是本阶段验证项；两次失败后暂停，检查 observation_error 和日志后再开启。观察不代表人脸追踪。</p></details></details>
+<p>同连接观察是本阶段验证项；格式或旧帧丢弃后延迟重试；两次协议失败后暂停，检查 observation_error 和日志后再开启。观察不代表人脸追踪。</p></details></details>
 <pre id="omni-status">尚未配置</pre><details><summary>Runtime 状态（新固件）</summary><pre id="runtime-status">尚未读取</pre></details></details>
 <script>
 window.addEventListener('DOMContentLoaded',()=>{
- const out=document.getElementById('omni-status');
- async function request(body){const r=await fetch('/api/lamp/omni',{method:body?'POST':'GET',headers:{'X-Lamp-Token':token,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined}); const j=await r.json(); document.getElementById("vision-panel").hidden=!j.manual_image_supported; out.textContent=JSON.stringify(j,null,2); document.getElementById('omni-capability').textContent=j.cloud_motion_enabled?'本固件已接入语义动作；上电不使能，明确运动命令可自动上力；需退出网页手动控制。图片功能见下方相机面板；下方可开启实验陪伴观察；语音伴随动作尚未开放。':'本固件为 PoC：只支持状态与结束对话，不支持云端运动。'; if(j.cloud_motion_enabled){try{const r=await fetch('/api/lamp/runtime',{headers:{'X-Lamp-Token':token}});document.getElementById('runtime-status').textContent=JSON.stringify(await r.json(),null,2)}catch(e){document.getElementById('runtime-status').textContent=e.message}} if(j.ok===false)throw new Error(j.error?.message||'请求失败');return j;}
+ const out=document.getElementById('omni-status'); let companionActive=false;
+ async function request(body){const r=await fetch('/api/lamp/omni',{method:body?'POST':'GET',headers:{'X-Lamp-Token':token,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined}); const j=await r.json(); companionActive=!!j.companion_enabled; document.getElementById("vision-panel").hidden=!j.manual_image_supported; out.textContent=JSON.stringify(j,null,2); document.getElementById('omni-capability').textContent=j.cloud_motion_enabled?'本固件已接入语义动作；上电不使能，明确运动命令可自动上力；需退出网页手动控制。图片功能见下方相机面板；下方可开启实验陪伴观察；语音伴随动作尚未开放。':'本固件为 PoC：只支持状态与结束对话，不支持云端运动。'; if(j.cloud_motion_enabled){try{const r=await fetch('/api/lamp/runtime',{headers:{'X-Lamp-Token':token}});document.getElementById('runtime-status').textContent=JSON.stringify(await r.json(),null,2)}catch(e){document.getElementById('runtime-status').textContent=e.message}} if(j.ok===false)throw new Error(j.error?.message||'请求失败');return j;}
  document.querySelectorAll('[data-omni]').forEach(b=>b.addEventListener('click',async()=>{b.disabled=true;try{let body={op:b.dataset.omni};if(body.op==='configure'){body.workspace=document.getElementById('omni-workspace').value.trim();body.region=document.getElementById('omni-region').value;body.key=document.getElementById('omni-key').value.trim();}await request(body);}catch(e){out.textContent=e.message;}finally{document.getElementById('omni-key').value='';b.disabled=false;}}));
  let previewUrl='', lastFrame=0;
  async function refreshVision(){
@@ -45,6 +45,7 @@ window.addEventListener('DOMContentLoaded',()=>{
    }else await request({op:'companion',enabled:id==='companion-start',actions:document.getElementById('companion-actions').checked,interval_s:Number(document.getElementById('companion-interval').value)});
   }catch(e){out.textContent=e.message;}finally{b.disabled=false;}
  });
+ document.getElementById('companion-actions').addEventListener('change',async()=>{if(companionActive)try{await request({op:'companion',enabled:true,actions:document.getElementById('companion-actions').checked,interval_s:Number(document.getElementById('companion-interval').value)});}catch(e){out.textContent=e.message;}});
  request().catch(e=>out.textContent=e.message);setInterval(()=>request().catch(()=>{}),2500);
 });
 </script>

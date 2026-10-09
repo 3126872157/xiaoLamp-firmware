@@ -146,6 +146,17 @@ void LampEdgeRuntime::Process(Work* work) {
         auto* steps = cJSON_AddArrayToObject(args.get(), "steps");
         cJSON_AddItemToArray(steps, step);
     }
+    if (operation == "execute_group") {
+        auto* steps = cJSON_GetObjectItem(args.get(), "steps");
+        for (auto* step = steps ? steps->child : nullptr; step; step = step->next) {
+            const auto skill = lamp::Text(step, "skill_id");
+            if (skill == "A01" || skill == "A02" || skill == "A03" || skill == "A16" ||
+                skill == "B01" || skill == "B02")
+                if (lamp::Text(step, "target_id") == "user" ||
+                    lamp::Text(step, "target_id") == "book")
+                    cJSON_DeleteItemFromObject(step, "target_id");
+        }
+    }
     Json command(cJSON_CreateObject(), cJSON_Delete);
     const auto request = executor_.NewRequestId();
     cJSON_AddStringToObject(command.get(), "protocol_version", lamp::kProtocol);
@@ -397,8 +408,11 @@ std::string LampEdgeRuntime::Tools() {
                 cJSON_AddItemToObject(
                     properties, "options",
                     cJSON_Duplicate(cJSON_GetObjectItem(row, "inputSchema"), true));
-                cJSON_AddItemToObject(properties, "target_id",
-                                      cJSON_Parse(R"({"type":"string","enum":["user","book"]})"));
+                if (id != "A01" && id != "A02" && id != "A03" && id != "A16" && id != "B01" &&
+                    id != "B02")
+                    cJSON_AddItemToObject(
+                        properties, "target_id",
+                        cJSON_Parse(R"({"type":"string","enum":["user","book"]})"));
                 if (cJSON_IsTrue(cJSON_GetObjectItem(row, "target_required")))
                     cJSON_AddItemToArray(required, cJSON_CreateString("target_id"));
             } else {

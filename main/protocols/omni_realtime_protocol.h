@@ -92,7 +92,9 @@ private:
     enum class ObservationPhase { Idle, Configure, Sample, Model, Restore };
     std::atomic<ObservationPhase> observation_phase_{ObservationPhase::Idle};
     std::shared_ptr<const OmniImage> observation_frame_;
-    int64_t observation_deadline_ = 0, sample_deadline_ = 0, quiet_since_ = 0;
+    int64_t observation_deadline_ = 0, sample_deadline_ = 0, quiet_since_ = 0,
+            observation_retry_at_ = 0;
+    unsigned companion_expression_sequence_ = 0;
     uint64_t observed_frame_ = 0, observation_turn_ = 0;
     std::string observation_response_, observation_text_;
     std::string speech_prefill_;

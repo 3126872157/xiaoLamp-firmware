@@ -377,7 +377,8 @@ int main() {
     assert(auto_actions == 0);  // Unarmed never causes motion.
     hardware_state = R"({"motion_enabled":true,"torque_enabled_confirmed":true,"mode":"work"})";
     observe("present", "nod");
-    assert(auto_actions == 0);  // Work is not preempted.
+    assert(auto_actions ==
+           1);  // Idle work posture permits only head expressions, never active work.
     hardware_state =
         R"({"motion_enabled":true,"torque_enabled_confirmed":true,"mode":"stand","manual_control":true})";
     photo->frame_id++;
@@ -386,12 +387,14 @@ int main() {
     assert(observer.observation_phase_ == OmniRealtimeProtocol::ObservationPhase::Idle);
     observation_once = false;
     hardware_state = R"({"motion_enabled":true,"torque_enabled_confirmed":true,"mode":"stand"})";
-    observe("absent", "nod");
-    assert(auto_actions == 1);
+    omni_test_time += 16000000;
+    observe("present", "nod");
+    assert(auto_actions == 2);
     observer.PollObservation();  // Consume the asynchronous acceptance, not mechanical completion.
     const auto saved_frame = observation_cached_frame;
     observe("present", "nod", true);
-    assert(auto_actions == 1 && observation_cached_frame == saved_frame);
+    assert(auto_actions == 2 && observation_cached_frame == saved_frame);
+    assert(observer.observation_attempts_ == 0 && companion_enabled);
     assert(speaker_events == 0);
     // Foreground voice invalidates only owned background motion and restores actual VAD config.
     observer.observation_phase_ = OmniRealtimeProtocol::ObservationPhase::Model;

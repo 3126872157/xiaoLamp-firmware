@@ -523,7 +523,7 @@ void OmniRealtimeProtocol::Disconnect(bool notify) {
     observation_response_.clear();
     observation_text_.clear();
     speech_prefill_.clear();
-    observation_deadline_ = sample_deadline_ = quiet_since_ = 0;
+    observation_deadline_ = sample_deadline_ = quiet_since_ = observation_retry_at_ = 0;
     observation_turn_ = 0;
     observed_frame_ = 0;
     have_luminance_ = false;
@@ -1050,9 +1050,9 @@ void OmniRealtimeProtocol::PollObservation() {
         interval = observation_interval_s;
     }
     const bool once = observation_once.load();
-    if (observation_attempts_ >= 2 || (!enabled && !once) || manual_ || !recording_ ||
-        !response_.empty() || awaiting_tools_ || speaking_ || !quiet_since_ ||
-        now - quiet_since_ < 2500000 || background_task_.valid())
+    if (now < observation_retry_at_ || observation_attempts_ >= 2 || (!enabled && !once) ||
+        manual_ || !recording_ || !response_.empty() || awaiting_tools_ || speaking_ ||
+        !quiet_since_ || now - quiet_since_ < 2500000 || background_task_.valid())
         return;
     auto frame = reader ? reader() : nullptr;
     if (!frame || frame->frame_id == observed_frame_ ||
@@ -1222,7 +1222,13 @@ bool OmniRealtimeProtocol::ObservationEvent(const cJSON* j, const std::string& t
         if (observation_phase_ != ObservationPhase::Model ||
             Str(response, "id") != observation_response_)
             return true;
-        auto observed = Parse(observation_text_);
+        auto structured = observation_text_;
+        if (structured.starts_with("```")) {
+            const auto start = structured.find('{'), end = structured.rfind('}');
+            if (start != std::string::npos && end != std::string::npos && end >= start)
+                structured = structured.substr(start, end - start + 1);
+        }
+        auto observed = Parse(structured);
         const auto* id = cJSON_GetObjectItem(observed.get(), "frame_id");
         const auto* confidence = cJSON_GetObjectItem(observed.get(), "confidence");
         const auto person = Str(observed.get(), "person"), book = Str(observed.get(), "book"),
@@ -1241,7 +1247,7 @@ bool OmniRealtimeProtocol::ObservationEvent(const cJSON* j, const std::string& t
             result_age >= 0 && result_age <= int64_t(interval) * 2000000 &&
             (!validate || (observation_frame_ && validate(*observation_frame_))) &&
             Str(response, "status") == "completed" && cJSON_IsObject(observed.get()) &&
-            cJSON_GetArraySize(observed.get()) == 7 && cJSON_IsNumber(id) && observation_frame_ &&
+            cJSON_IsNumber(id) && observation_frame_ &&
             id->valuedouble == double(observation_frame_->frame_id) && cJSON_IsNumber(confidence) &&
             confidence->valuedouble >= 0 && confidence->valuedouble <= 1 &&
             (person == "present" || person == "absent" || person == "unknown") &&
@@ -1254,13 +1260,9 @@ bool OmniRealtimeProtocol::ObservationEvent(const cJSON* j, const std::string& t
              action == "gaze_book");
         if (valid) {
             observation_attempts_ = 0;
-            bool changed = false, actions = false;
+            bool actions = false;
             {
                 std::lock_guard lock(config_mutex);
-                auto old = Parse(observation_cache);
-                changed =
-                    old && (Str(old.get(), "person") != person || Str(old.get(), "book") != book ||
-                            Str(old.get(), "activity") != activity);
                 observation_cache = Dump(observed.get());
                 observation_at = observation_frame_->captured_at_us;
                 observation_cached_frame = observation_frame_->frame_id;
@@ -1279,21 +1281,25 @@ bool OmniRealtimeProtocol::ObservationEvent(const cJSON* j, const std::string& t
             }
             auto hardware = Parse(state ? state() : "{}");
             const auto now = esp_timer_get_time();
-            if (changed && actions && confidence->valuedouble >= .7 && dispatch &&
+            if (actions && (person == "present" || book == "present") &&
+                confidence->valuedouble >= .7 && dispatch &&
                 now - last_autonomous_action >= 15000000 &&
                 cJSON_IsTrue(cJSON_GetObjectItem(hardware.get(), "motion_enabled")) &&
                 cJSON_IsTrue(cJSON_GetObjectItem(hardware.get(), "torque_enabled_confirmed")) &&
                 !cJSON_IsTrue(cJSON_GetObjectItem(hardware.get(), "busy")) &&
-                !cJSON_IsTrue(cJSON_GetObjectItem(hardware.get(), "manual_control")) &&
-                Str(hardware.get(), "mode") != "work") {
-                std::string args;
-                if (action == "nod" || action == "tilt")
-                    args = "{\"steps\":[{\"action_id\":\"execute_primitive\",\"skill_id\":\"" +
-                           std::string(action == "nod" ? "A01" : "B02") +
-                           "\",\"options\":{\"end_mode\":\"return_to_reference\"}}]}";
-                else if (action == "gaze_user" || action == "gaze_book")
-                    args = "{\"steps\":[{\"action_id\":\"gaze_calibrated\",\"target_id\":\"" +
-                           std::string(action == "gaze_user" ? "user" : "book") + "\"}]}";
+                !cJSON_IsTrue(cJSON_GetObjectItem(hardware.get(), "manual_control"))) {
+                // A visual suggestion is optional. Relative expressions require no target
+                // calibration. A static work posture may tilt/nod; an active work task remains
+                // protected by busy.
+                static constexpr const char* expressions[] = {"B02", "A01", "B01",
+                                                              "A02", "A03", "A16"};
+                const auto index = companion_expression_sequence_++;
+                const auto skill = Str(hardware.get(), "mode") == "work"
+                                       ? (index % 2 ? "A01" : "B02")
+                                       : expressions[index % 6];
+                const std::string args =
+                    "{\"steps\":[{\"action_id\":\"execute_primitive\",\"skill_id\":\"" +
+                    std::string(skill) + "\",\"options\":{\"end_mode\":\"return_to_reference\"}}]}";
                 if (!args.empty()) {
                     turn_ = observation_turn_ = ++turn_sequence;
                     background_task_ = dispatch("lamp_run_sequence", args, turn_);
@@ -1301,11 +1307,18 @@ bool OmniRealtimeProtocol::ObservationEvent(const cJSON* j, const std::string& t
                 }
             }
         } else {
-            ++observation_attempts_;
+            observation_retry_at_ = esp_timer_get_time() + 10000000;
             std::lock_guard lock(config_mutex);
-            observation_status = "invalid_result";
+            observation_status = "invalid_result_retry";
             observation_error =
-                "Invalid/stale structured observation; not sent to speaker or hardware";
+                "Invalid/stale observation; dropped, retry after 10s; frame/status/schema/pose "
+                "check";
+            Board::GetInstance().RecordDiagnostic(
+                "observation_rejected", "validation",
+                "frame=" + std::to_string(observation_frame_ ? observation_frame_->frame_id : 0) +
+                    "; age_ms=" + std::to_string(result_age / 1000) +
+                    "; echoed_frame=" + std::to_string(cJSON_IsNumber(id) ? id->valuedouble : -1) +
+                    "; fields=" + std::to_string(cJSON_GetArraySize(observed.get())));
         }
         observation_response_.clear();  // Already completed: no redundant cancellation.
         observation_phase_ =
@@ -1331,8 +1344,7 @@ void OmniRealtimeProtocol::Run() {
         if (manual_ && recording_ && recording_since_ &&
             esp_timer_get_time() - recording_since_ > 30000000)
             Fail("Manual recording exceeded 30 seconds; start a new turn");
-        if (session_since_ && esp_timer_get_time() - session_since_ > 300000000)
-            Fail("PoC session reached its five-minute limit; reconnect explicitly");
+        // No arbitrary five-minute failure; provider disconnects remain explicit errors.
         if (cancel_.exchange(false)) {
             cancelled_response_ = response_;
             response_.clear();
