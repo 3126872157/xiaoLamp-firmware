@@ -95,4 +95,11 @@ class OmniContractTests(unittest.TestCase):
         result = subprocess.run([str(binary)],capture_output=True,text=True,check=True)
         self.assertIn('PASS handshake',result.stdout)
 
+    def test_software_aes_experiment_is_only_in_edge_variant(self):
+        config = json.loads((ROOT/'main/boards/waveshare/apple-lamp-ov3660/config.json').read_text(encoding='utf-8'))
+        for build in config['builds']:
+            expected = 'n' if build['name'] == 'apple-lamp-ov3660-edge-runtime' else 'y'
+            self.assertEqual([v for v in build['sdkconfig_append'] if v.startswith('CONFIG_MBEDTLS_HARDWARE_AES=')],
+                             ['CONFIG_MBEDTLS_HARDWARE_AES=' + expected])
+
 if __name__ == '__main__': unittest.main()

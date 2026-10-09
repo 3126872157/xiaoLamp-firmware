@@ -21,7 +21,8 @@
                 "CONFIG_APPLE_LAMP_HARDWARE_MOTION=n",
                 "CONFIG_APPLE_LAMP_TWIN_WEB=n",
                 "CONFIG_APPLE_LAMP_OMNI_REALTIME=n",
-                "CONFIG_APPLE_LAMP_EDGE_RUNTIME=n"
+                "CONFIG_APPLE_LAMP_EDGE_RUNTIME=n",
+                "CONFIG_MBEDTLS_HARDWARE_AES=y"
             ]
         },
         {
@@ -42,7 +43,8 @@
                 "CONFIG_APPLE_LAMP_HARDWARE_MOTION=n",
                 "CONFIG_APPLE_LAMP_TWIN_WEB=n",
                 "CONFIG_APPLE_LAMP_OMNI_REALTIME=n",
-                "CONFIG_APPLE_LAMP_EDGE_RUNTIME=n"
+                "CONFIG_APPLE_LAMP_EDGE_RUNTIME=n",
+                "CONFIG_MBEDTLS_HARDWARE_AES=y"
             ]
         },
         {
@@ -63,7 +65,8 @@
                 "CONFIG_APPLE_LAMP_HARDWARE_MOTION=y",
                 "CONFIG_APPLE_LAMP_TWIN_WEB=n",
                 "CONFIG_APPLE_LAMP_OMNI_REALTIME=n",
-                "CONFIG_APPLE_LAMP_EDGE_RUNTIME=n"
+                "CONFIG_APPLE_LAMP_EDGE_RUNTIME=n",
+                "CONFIG_MBEDTLS_HARDWARE_AES=y"
             ]
         },
         {
@@ -84,7 +87,8 @@
                 "CONFIG_APPLE_LAMP_HARDWARE_MOTION=y",
                 "CONFIG_APPLE_LAMP_TWIN_WEB=y",
                 "CONFIG_APPLE_LAMP_OMNI_REALTIME=n",
-                "CONFIG_APPLE_LAMP_EDGE_RUNTIME=n"
+                "CONFIG_APPLE_LAMP_EDGE_RUNTIME=n",
+                "CONFIG_MBEDTLS_HARDWARE_AES=y"
             ]
         },
         {
@@ -105,7 +109,8 @@
                 "CONFIG_APPLE_LAMP_HARDWARE_MOTION=y",
                 "CONFIG_APPLE_LAMP_TWIN_WEB=y",
                 "CONFIG_APPLE_LAMP_OMNI_REALTIME=y",
-                "CONFIG_APPLE_LAMP_EDGE_RUNTIME=n"
+                "CONFIG_APPLE_LAMP_EDGE_RUNTIME=n",
+                "CONFIG_MBEDTLS_HARDWARE_AES=y"
             ]
         },
         {
@@ -126,7 +131,8 @@
                 "CONFIG_APPLE_LAMP_HARDWARE_MOTION=y",
                 "CONFIG_APPLE_LAMP_TWIN_WEB=y",
                 "CONFIG_APPLE_LAMP_OMNI_REALTIME=y",
-                "CONFIG_APPLE_LAMP_EDGE_RUNTIME=y"
+                "CONFIG_APPLE_LAMP_EDGE_RUNTIME=y",
+                "CONFIG_MBEDTLS_HARDWARE_AES=n"
             ]
         }
     ]
