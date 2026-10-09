@@ -646,6 +646,18 @@ int main() {
     assert(ambient.BackgroundQuiet(noise));
     std::string loud(1920, '\x7f');
     assert(!ambient.BackgroundQuiet(loud));
+    ambient.ready_ = true;
+    ambient.manual_ = false;
+    ambient.recording_ = true;
+    ambient.quiet_since_ = omni_test_time - 3000000;
+    companion_enabled = true;
+    observation_once = false;
+    observation_wait_reason.clear();
+    const auto waits_before = Board::GetInstance().observation_wait_events;
+    for (int i = 0; i < 100; ++i)
+        ambient.PollObservation();
+    assert(observation_wait_reason == "waiting_for_fresh_camera_frame");
+    assert(Board::GetInstance().observation_wait_events == waits_before + 1);
     auto info = OmniPanel();
     assert(info.find("dummy-secret") == std::string::npos);
     std::cout << "PASS handshake, PCM, stale response, function output/dedup, cancel and corrupt "

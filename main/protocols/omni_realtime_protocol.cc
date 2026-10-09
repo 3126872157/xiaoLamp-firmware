@@ -1460,7 +1460,6 @@ void OmniRealtimeProtocol::PollObservation() {
         ObservationWait(wait);
         return;
     }
-    ObservationWait("eligible");
     auto frame = reader ? reader() : nullptr;
     if (!frame || frame->frame_id == observed_frame_ ||
         now - frame->captured_at_us > int64_t(interval) * 2000000) {
@@ -1488,6 +1487,7 @@ void OmniRealtimeProtocol::PollObservation() {
             return;
         }
     }
+    ObservationWait("eligible");
     observation_once = false;
     observation_is_once_ = once;
     observation_frame_ = frame;

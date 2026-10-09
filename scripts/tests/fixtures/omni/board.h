@@ -11,6 +11,10 @@ public:
         return b;
     }
     FakeNetwork* GetNetwork() { return &network; }
-    void RecordDiagnostic(const std::string&, const std::string&, const std::string&) {}
+    void RecordDiagnostic(const std::string& kind, const std::string&, const std::string&) {
+        if (kind == "observation_wait")
+            ++observation_wait_events;
+    }
+    unsigned observation_wait_events = 0;
     FakeNetwork network;
 };
