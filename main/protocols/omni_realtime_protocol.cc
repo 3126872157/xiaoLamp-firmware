@@ -836,8 +836,11 @@ void OmniRealtimeProtocol::Run() {
             Status(manual_ ? "listening_manual" : "listening_vad");
         } else if (w->text == "@finish") {
             if (manual_ && had_audio_) {
-                if (!AppendImage())
+                if (!AppendImage()) {
+                    had_audio_ = false;
+                    Write(R"({"type":"input_audio_buffer.clear"})");
                     continue;
+                }
                 Write(R"({"type":"input_audio_buffer.commit"})");
             }
             had_audio_ = false;

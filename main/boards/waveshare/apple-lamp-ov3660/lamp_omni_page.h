@@ -9,7 +9,7 @@ inline constexpr const char* kLampOmniPage = R"omnipage(
 <label>百炼 API Key <input id="omni-key" type="password" maxlength="512" autocomplete="new-password"></label>
 <div class="buttons"><button data-omni="configure">保存设备配置</button><button data-omni="start">开始录音</button><button data-omni="finish">结束并回复</button><button data-omni="vad">开始 VAD 对话</button><button data-omni="cancel">取消本轮</button><button data-omni="close">断开会话</button><button data-omni="clear">清除 Key</button></div>
 <details id="vision-panel" hidden><summary>相机与单图语音 · 阶段三</summary>
-<p>先拍照，检查画面颜色与方向。开启附图后，用“开始录音 → 结束并回复”询问图片；结束时图片须在30秒内。VAD请先关闭附图。</p>
+<p>先拍照，检查画面颜色与方向。开启附图后，用“开始录音 → 结束并回复”询问图片；结束时图片须在30秒内。过期或拍照失败请重新拍照、重新录音；切换附图开关先断开会话。VAD请先关闭附图。</p>
 <div class="buttons"><button id="vision-capture">拍照预览</button><button data-omni="vision_on">开启手动附图</button><button data-omni="vision_off">关闭手动附图</button></div>
 <img id="vision-preview" alt="最新相机照片" hidden style="max-width:100%;height:auto;object-fit:contain">
 <pre id="vision-status">尚未拍照</pre></details>
