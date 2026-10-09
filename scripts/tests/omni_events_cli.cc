@@ -219,6 +219,29 @@ int main() {
     batch.CompleteTools();
     assert(order.size() == 2 && order[1] == "lamp_run_sequence" && !batch.awaiting_tools_);
     OmniSetRuntime({}, {}, "");
+    // The real transport clones masked frames and caps one frame at 65535 bytes.
+    // Our fixture rejects >2048-byte fragments and reassembles one complete JSON message.
+    OmniRealtimeProtocol fragmented;
+    fragmented.socket_ = std::make_unique<WebSocket>();
+    fragmented.ready_ = true;
+    const std::string large_message =
+        "{\"type\":\"session.update\",\"tools\":\"" + std::string(14330, 'x') + "\"}";
+    assert(fragmented.Write(large_message));
+    assert(fragmented.socket_->sent.size() == 1 && fragmented.socket_->sent[0] == large_message);
+    assert(fragmented.socket_->frames > 1 && fragmented.socket_->pending.empty());
+    assert(fragmented.Write(
+        std::string(90000, 'x')));  // Larger than one vendor frame, still one WS message.
+    assert(fragmented.socket_->sent.back().size() == 90000);
+    OmniRealtimeProtocol partial;
+    partial.socket_ = std::make_unique<WebSocket>();
+    partial.ready_ = true;
+    partial.socket_->fail_frame = 2;
+    assert(!partial.Write(large_message) && partial.close_);
+    assert(partial.socket_->frames == 2 && partial.socket_->sent.empty());
+    assert(!partial.Write(R"({"type":"input_audio_buffer.clear"})") &&
+           partial.socket_->frames == 2);
+    // Mode completion guidance is short; accepted/in-progress is never reported completed.
+    assert(batch.socket_->sent.front().find("response_instruction") != std::string::npos);
     OmniRealtimeProtocol flaky;
     flaky.socket_ = std::make_unique<WebSocket>();
     flaky.ready_ = true;
@@ -375,6 +398,13 @@ int main() {
     observer.observation_response_ = "background";
     observer.RestoreForeground("test_voice", true);
     assert(owned_cancel == 1);
+    assert(observer.socket_->sent.back().find("\"audio\":{") == std::string::npos);
+    // Restore a realistic full tool schema on a transport with a small frame budget.
+    runtime_tools = "[{\"type\":\"function\",\"description\":\"" + std::string(12000, 't') + "\"}]";
+    observer.RestoreForeground("test_restore", true);
+    assert(observer.ready_ && !observer.close_);
+    assert(observer.socket_->sent.back().size() > 12000);
+    runtime_tools = "[]";
     observer.speech_prefill_ = std::string(1920, '\0');
     observer.Receive(R"({"type":"session.updated","session":{"modalities":["text","audio"]}})");
     assert(observer.socket_->sent.back().find("input_audio_buffer.append") != std::string::npos);

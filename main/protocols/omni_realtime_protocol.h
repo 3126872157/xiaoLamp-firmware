@@ -114,5 +114,5 @@ private:
     void Receive(const std::string& text);
     void Emit(const char* state, const std::string& text = "");
     void Fail(const char* message);
-    std::string Session(bool manual);
+    std::string Session(bool manual, bool include_audio = true);
 };

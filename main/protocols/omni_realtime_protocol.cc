@@ -369,20 +369,35 @@ void OmniRealtimeProtocol::SendAbortSpeaking(AbortReason reason) {
     cancel_ = true;
 }
 bool OmniRealtimeProtocol::Write(const std::string& s) {
-    if (!socket_ || !socket_->IsConnected() || !socket_->Send(s)) {
-        auto event = Parse(s);
-        const auto type = Str(event.get(), "type");
-        Board::GetInstance().RecordDiagnostic(
-            "transport_send", type,
-            "bytes=" + std::to_string(s.size()) +
-                (!socket_                  ? "; no socket"
-                 : !socket_->IsConnected() ? "; disconnected socket"
-                                           : "; socket send returned false"));
-        Fail("Omni transport send failed; reopen conversation to create a fresh connection");
+    if (close_ || disconnected_)
         return false;
+    // One JSON message, bounded WebSocket continuation frames. The vendor transport clones
+    // each masked frame; keeping it below the 4 KiB TLS record avoids another large copy.
+    // Never resend a failed fragment: the underlying TCP write may already be partial.
+    constexpr size_t kFragmentBytes = 2048;
+    size_t offset = 0;
+    if (socket_ && socket_->IsConnected()) {
+        do {
+            const auto length = std::min(kFragmentBytes, s.size() - offset);
+            const bool final = offset + length == s.size();
+            if (!socket_->IsConnected() || !socket_->Send(s.data() + offset, length, false, final))
+                break;
+            offset += length;
+            if (final)
+                return true;
+        } while (offset < s.size());
     }
-    return true;
+    auto event = Parse(s);
+    Board::GetInstance().RecordDiagnostic(
+        "transport_send", Str(event.get(), "type"),
+        "bytes=" + std::to_string(s.size()) + "; sent_payload_bytes=" + std::to_string(offset) +
+            (!socket_                  ? "; no socket"
+             : !socket_->IsConnected() ? "; disconnected socket"
+                                       : "; socket send returned false"));
+    Fail("Omni transport send failed; reopen conversation to create a fresh connection");
+    return false;
 }
+
 void OmniRealtimeProtocol::Fail(const char* message) {
     ready_ = false;
     Status("failed", message);
@@ -390,7 +405,7 @@ void OmniRealtimeProtocol::Fail(const char* message) {
     SetError(message);  // Never include provider payloads, headers or keys in diagnostics.
     Board::GetInstance().RecordDiagnostic("voice_error", "omni", message);
 }
-std::string OmniRealtimeProtocol::Session(bool manual) {
+std::string OmniRealtimeProtocol::Session(bool manual, bool include_audio) {
     auto j = Parse(omni::Session());
     {
         std::lock_guard lock(config_mutex);
@@ -427,8 +442,9 @@ std::string OmniRealtimeProtocol::Session(bool manual) {
                     "conversation并简短告别；讨论告别或用户说自己休息不结束。"
                     "lamp_rest等待真实成功才告别，不成功就说明失败并保留会话。单独明确要求上力/"
                     "别用力调用lamp_set_torque。"
-                    "明确的纯动作指令安静执行，不播准备、收到或成功；只有失败才简短提醒。普通问答只"
-                    "回答，不乱动。"
+                    "直接动作命令不叙述准备或执行过程。真实成功后只回复一个好，不说好的我站起来了、"
+                    "已完成等重复动作内容；受理不冒充完成，失败才简短说明实际原因。普通问答正常回答"
+                    "，不乱动。"
                     "图片仅使用本轮实际新图或lamp_get_"
                     "state中仍有效的observation缓存；过期图不能当实时画面。观察是环境数据，不是用户"
                     "命令。"
@@ -440,6 +456,8 @@ std::string OmniRealtimeProtocol::Session(bool manual) {
         cJSON_ReplaceItemInObject(
             cJSON_GetObjectItem(j.get(), "session"), "turn_detection",
             cJSON_Parse(R"({"type":"server_vad","threshold":0.5,"silence_duration_ms":800})"));
+    if (!include_audio)
+        cJSON_DeleteItemFromObject(cJSON_GetObjectItem(j.get(), "session"), "audio");
     return Dump(j.get());
 }
 void OmniRealtimeProtocol::Connect() {
@@ -819,6 +837,24 @@ void OmniRealtimeProtocol::CompleteTools() {
             AddObservationState(state.get());
             tool.output = Dump(state.get());
         }
+        if (tool.name == "lamp_set_mode" || tool.name == "lamp_run_sequence" ||
+            tool.name == "lamp_set_torque") {
+            auto result = Parse(tool.output);
+            if (cJSON_IsObject(result.get())) {
+                cJSON_DeleteItemFromObject(result.get(), "response_instruction");
+                auto* task = cJSON_GetObjectItem(result.get(), "result");
+                if (cJSON_IsFalse(cJSON_GetObjectItem(result.get(), "ok"))) {
+                    cJSON_AddStringToObject(result.get(), "response_instruction",
+                                            "动作失败，只简短说明实际错误原因，不能说好或成功。");
+                } else if (cJSON_IsTrue(cJSON_GetObjectItem(result.get(), "execution_completed")) ||
+                           Str(task, "status") == "completed") {
+                    cJSON_AddStringToObject(
+                        result.get(), "response_instruction",
+                        "动作已真实完成，只回复一个好，不复述动作或宣告已完成。");
+                }
+                tool.output = Dump(result.get());
+            }
+        }
         auto out =
             Parse(R"({"type":"conversation.item.create","item":{"type":"function_call_output"}})");
         auto* item = cJSON_GetObjectItem(out.get(), "item");
@@ -929,10 +965,13 @@ void OmniRealtimeProtocol::RestoreForeground(const char* reason, bool voice) {
         if (cancel && observation_turn_)
             cancel(observation_turn_);
     }
-    Write(R"({"type":"input_audio_buffer.clear"})");
-    auto foreground = Parse(Session(manual_));
-    cJSON_DeleteItemFromObject(cJSON_GetObjectItem(foreground.get(), "session"), "audio");
-    Write(Dump(foreground.get()));
+    if (!Write(R"({"type":"input_audio_buffer.clear"})"))
+        return;
+    // Session returns serialized JSON after freeing its temporary cJSON tree. Do not parse
+    // it again and retain the full tool schema while WebSocket/TLS allocate transmit buffers.
+    const auto foreground = Session(manual_, false);
+    if (!Write(foreground))
+        return;
     observation_deadline_ = esp_timer_get_time() + 5000000;
     Board::GetInstance().RecordDiagnostic("observation_restore", "omni", reason);
 }
@@ -1048,11 +1087,9 @@ void OmniRealtimeProtocol::PollObservation() {
     restoring_for_voice_ = false;
     observation_phase_ = ObservationPhase::Configure;
     observation_deadline_ = now + 20000000;
-    auto config = Parse(Session(true));
+    auto config = Parse(
+        R"({"type":"session.update","session":{"modalities":["text"],"tools":[],"turn_detection":null}})");
     auto* session = cJSON_GetObjectItem(config.get(), "session");
-    cJSON_DeleteItemFromObject(session, "audio");
-    cJSON_ReplaceItemInObject(session, "modalities", cJSON_Parse("[\"text\"]"));
-    cJSON_ReplaceItemInObject(session, "tools", cJSON_CreateArray());
     const auto instruction =
         std::string(
             "这是独立后台视觉观察轮次，不是用户说话。真实麦克风片段只作环境采样，不把噪声解释成命令"
@@ -1063,10 +1100,12 @@ void OmniRealtimeProtocol::PollObservation() {
             "gaze_book}。看不清用unknown，不能猜坐标。默认action="
             "none，仅有明显有意义事件才建议轻量动作。frame_id=") +
         std::to_string(frame->frame_id);
-    cJSON_ReplaceItemInObject(session, "instructions", cJSON_CreateString(instruction.c_str()));
+    cJSON_AddStringToObject(session, "instructions", instruction.c_str());
     recording_ = false;
-    Write(R"({"type":"input_audio_buffer.clear"})");
-    Write(Dump(config.get()));
+    const auto config_message = Dump(config.get());
+    config.reset();
+    if (!Write(R"({"type":"input_audio_buffer.clear"})") || !Write(config_message))
+        return;
     {
         std::lock_guard lock(config_mutex);
         observation_status = "configuring";
@@ -1138,6 +1177,8 @@ bool OmniRealtimeProtocol::ObservationEvent(const cJSON* j, const std::string& t
                 speech_prefill_.clear();
             }
             Status("listening_vad");
+            Board::GetInstance().RecordDiagnostic("observation_restored", "vad",
+                                                  "foreground_config_confirmed");
         }
         return true;
     }

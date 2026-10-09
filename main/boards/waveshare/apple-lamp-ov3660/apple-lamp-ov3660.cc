@@ -148,7 +148,8 @@ public:
                 CJsonUniquePtr current(cJSON_Parse(hardware->State().c_str()));
                 auto* before = cJSON_GetObjectItem(captured.get(), "pose_rad");
                 auto* after = cJSON_GetObjectItem(current.get(), "pose_rad");
-                if (!cJSON_IsObject(before) || !cJSON_IsObject(after))
+                if (!cJSON_IsObject(before) || !cJSON_IsObject(after) ||
+                    !cJSON_GetArraySize(before) || !cJSON_GetArraySize(after))
                     return !cJSON_IsTrue(cJSON_GetObjectItem(captured.get(), "available")) &&
                            !cJSON_IsTrue(cJSON_GetObjectItem(current.get(), "available"));
                 for (auto* key : {"baseYaw", "shoulder", "elbow", "wrist", "headRoll"}) {
