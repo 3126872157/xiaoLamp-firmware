@@ -26,7 +26,7 @@ std::function<void(bool, unsigned)> vision_periodic;
 std::function<bool(const OmniImage&)> image_valid;
 bool companion_enabled = false, companion_actions = false;
 bool transcription_enabled = false;
-unsigned observation_interval_s = 5;
+unsigned observation_interval_s = 60;
 std::string observation_wait_reason;
 unsigned reconnect_attempts = 0;
 int64_t reconnect_wait_ms = 0;
@@ -154,9 +154,9 @@ std::string OmniPanel(const std::string& request) {
             auto* interval = cJSON_GetObjectItem(body.get(), "interval_s");
             auto* actions = cJSON_GetObjectItem(body.get(), "actions");
             if (!cJSON_IsBool(enabled) || !cJSON_IsNumber(interval) || interval->valuedouble < 2 ||
-                interval->valuedouble > 30 || interval->valuedouble != interval->valueint ||
+                interval->valuedouble > 3600 || interval->valuedouble != interval->valueint ||
                 !cJSON_IsBool(actions))
-                return R"({"ok":false,"error":{"message":"Expected enabled/actions booleans and interval_s 2..30"}})";
+                return R"({"ok":false,"error":{"message":"Expected enabled/actions booleans and interval_s 2..3600"}})";
             companion_enabled = cJSON_IsTrue(enabled);
             if (companion_enabled)
                 observation_reset = true;
@@ -2137,6 +2137,13 @@ void OmniRealtimeProtocol::Run() {
                     continue;
                 }
                 Write(R"({"type":"input_audio_buffer.commit"})");
+                // Manual image input is single-shot: after a successful turn,
+                // clear the gate so a later VAD conversation is not blocked.
+                std::lock_guard lock(config_mutex);
+                if (image_enabled) {
+                    image_enabled = false;
+                    image_error.clear();
+                }
             }
             had_audio_ = false;
         } else

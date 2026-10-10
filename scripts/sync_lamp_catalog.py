@@ -5,11 +5,13 @@ import json
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
-board = root / "main/boards/waveshare/apple-lamp-ov3660"
 parser = argparse.ArgumentParser()
 parser.add_argument("--source", type=Path)
 parser.add_argument("--check", action="store_true")
+parser.add_argument("--board", default="apple-lamp-ov3660",
+                    help="Target board directory under waveshare/ (default: apple-lamp-ov3660)")
 args = parser.parse_args()
+board = root / f"main/boards/waveshare/{args.board}"
 source = args.source or (board / "lamp_action_catalog.v2.json")
 catalog = json.loads(source.read_text(encoding="utf-8-sig"))
 assert catalog["protocol_version"] == "lamp-action/2"

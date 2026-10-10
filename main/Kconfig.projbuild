@@ -158,6 +158,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_ATK_DNESP32S3M_WIFI
         bool "Alientek ATK-DNESP32S3M Wi-Fi (正点原子)"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_APPLE_LAMP_OV2640
+        bool "Apple Lamp OV2640 (custom board, external amp + PDM mic, no display)"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_APPLE_LAMP_OV3660
         bool "Apple Lamp OV3660 (Waveshare ESP32-S3-CAM, no display)"
         depends on IDF_TARGET_ESP32S3
@@ -1156,7 +1159,7 @@ menu "TAIJIPAI_S3_CONFIG"
 endmenu
 
 menu "Apple Lamp execution backend"
-    depends on BOARD_TYPE_APPLE_LAMP_OV3660
+    depends on BOARD_TYPE_APPLE_LAMP_OV3660 || BOARD_TYPE_APPLE_LAMP_OV2640
     config APPLE_LAMP_EDGE_RUNTIME
         bool "Omni local semantic runtime"
         depends on APPLE_LAMP_OMNI_REALTIME && APPLE_LAMP_HARDWARE_MOTION

@@ -9,21 +9,32 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-ROLES = {
-    "edge-runtime": ("apple-lamp-ov3660-edge-runtime", b"Firmware role: EDGE-RUNTIME"),
-    "omni-poc": ("apple-lamp-ov3660-omni-poc", b"Firmware role: OMNI-POC"),
-    "simulator": ("apple-lamp-ov3660", b"Firmware role: SIMULATOR-BRIDGE"),
-    "local-readonly": ("apple-lamp-ov3660-local-readonly", b"Firmware role: LOCAL-READONLY"),
-    "local-hardware": ("apple-lamp-ov3660-local-hardware", b"Firmware role: LOCAL-HARDWARE"),
-    "local-twin": ("apple-lamp-ov3660-local-twin", b"Firmware role: LOCAL-TWIN"),
+BOARDS = ["apple-lamp-ov3660", "apple-lamp-ov2640"]
+DEFAULT_BOARD = BOARDS[0]
+ROLE_MARKERS = {
+    "edge-runtime": b"Firmware role: EDGE-RUNTIME",
+    "omni-poc": b"Firmware role: OMNI-POC",
+    "simulator": b"Firmware role: SIMULATOR-BRIDGE",
+    "local-readonly": b"Firmware role: LOCAL-READONLY",
+    "local-hardware": b"Firmware role: LOCAL-HARDWARE",
+    "local-twin": b"Firmware role: LOCAL-TWIN",
 }
 
 
-def validate_role(image: bytes, role: str, sdk: str):
-    name, marker = ROLES[role]
+def role_name(board: str, role: str) -> str:
+    return board if role == "simulator" else f"{board}-{role}"
+
+
+# Backward-compatible role -> (board_name, marker) view for the default board.
+ROLES = {role: (role_name(DEFAULT_BOARD, role), marker) for role, marker in ROLE_MARKERS.items()}
+
+
+def validate_role(image: bytes, role: str, sdk: str, board: str = DEFAULT_BOARD):
+    name = role_name(board, role)
+    marker = ROLE_MARKERS[role]
     if marker not in image or name.encode() not in image:
         raise ValueError("Binary role/board identity does not match requested artifact")
-    for other, (_, other_marker) in ROLES.items():
+    for other, other_marker in ROLE_MARKERS.items():
         if other != role and other_marker in image:
             raise ValueError("Binary contains the opposite application role")
     if ("CONFIG_APPLE_LAMP_OMNI_REALTIME=y" in sdk.splitlines()) != (role in ("omni-poc", "edge-runtime")):
@@ -41,10 +52,10 @@ def validate_role(image: bytes, role: str, sdk: str):
 
 
 
-def archive(role: str):
+def archive(role: str, board: str = DEFAULT_BOARD):
     build = ROOT / "build"
     image = (build / "xiaozhi.bin").read_bytes()
-    validate_role(image, role, (ROOT / "sdkconfig").read_text(encoding="utf-8"))
+    validate_role(image, role, (ROOT / "sdkconfig").read_text(encoding="utf-8"), board)
     args = json.loads((build / "flasher_args.json").read_text(encoding="utf-8"))
     digest = hashlib.sha256(image).hexdigest()
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
@@ -60,7 +71,7 @@ def archive(role: str):
             raise ValueError("Unexpected archive image path")
         sources.append((source, target))
         files.append({"address": address, "file": relative, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()})
-    manifest = {"role": role, "board_name": ROLES[role][0], "git_commit": commit,
+    manifest = {"role": role, "board_name": role_name(board, role), "git_commit": commit,
                 "worktree_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
                 "app_sha256": digest, "motion_enabled": role in ("local-hardware", "local-twin", "omni-poc", "edge-runtime"),
                 "startup_armed": False,
@@ -104,7 +115,9 @@ def flash(manifest_path: Path, role: str, port: str):
 
 def main():
     parser = argparse.ArgumentParser(__doc__)
-    parser.add_argument("--role", choices=ROLES, required=True)
+    parser.add_argument("--board", choices=BOARDS, default=BOARDS[0],
+                        help="Target board directory under waveshare/ (default: apple-lamp-ov3660)")
+    parser.add_argument("--role", choices=ROLE_MARKERS, required=True)
     parser.add_argument("--archive-only", action="store_true", help="Validate/archive existing build; does not guess role")
     parser.add_argument("--flash", action="store_true")
     parser.add_argument("--port")
@@ -113,9 +126,9 @@ def main():
         parser.error("--flash requires explicit --port")
     if not args.archive_only:
         env = os.environ.copy(); env["CCACHE_DISABLE"] = "1"; env["CMAKE_NINJA_FORCE_RESPONSE_FILE"] = "1"
-        subprocess.run([sys.executable, "scripts/build.py", "waveshare/apple-lamp-ov3660", "--name",
-                        ROLES[args.role][0], "--language", "zh-CN"], cwd=ROOT, env=env, check=True)
-    manifest = archive(args.role)
+        subprocess.run([sys.executable, "scripts/build.py", f"waveshare/{args.board}", "--name",
+                        role_name(args.board, args.role), "--language", "zh-CN"], cwd=ROOT, env=env, check=True)
+    manifest = archive(args.role, args.board)
     print(f"ROLE={args.role}; manifest={manifest}; hardware motion capability={args.role in ('local-hardware', 'local-twin', 'omni-poc', 'edge-runtime')}; startup disarmed", flush=True)
     if args.flash:
         flash(manifest, args.role, args.port)
