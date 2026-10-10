@@ -772,6 +772,8 @@ def _detect_idf_version() -> tuple[int, int, int]:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         ).stdout
         return _parse_version(output)
     except (FileNotFoundError, subprocess.CalledProcessError, ValueError) as error:

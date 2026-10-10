@@ -27,13 +27,14 @@ class CiSelectionTests(unittest.TestCase):
             path.write_text(json.dumps(manifest))
             return build._load_representative_variants(self.variants, path)
 
-    def test_reviewed_list_has_18_builds_and_all_chip_targets(self):
+    def test_reviewed_list_has_2_builds_and_all_chip_targets(self):
         selected = self.load_manifest(self.manifest)
-        self.assertEqual(len(selected), 18)
+        self.assertEqual(len(selected), 2)
         self.assertEqual(
             {item["target"] for item in selected},
             {item["target"] for item in self.variants},
         )
+        self.assertEqual({item["target"] for item in selected}, {"esp32s3"})
         self.assertEqual(
             len({item.get("ci_name", item["full_name"]) for item in selected}),
             len(selected),
@@ -54,51 +55,48 @@ class CiSelectionTests(unittest.TestCase):
                 )
 
     def test_board_only_includes_all_its_variants(self):
-        board = "waveshare/esp32-p4-wifi6-touch-lcd"
+        board = "waveshare/apple-lamp-ov3660"
         selected = build._select_variants_for_changes(
             self.variants, [f"main/boards/{board}/config.h"]
         )
         self.assertEqual(selected, [v for v in self.variants if v["board"] == board])
-        self.assertGreater(len(selected), 1)
+        self.assertGreater(len(selected), 0)
 
-    def test_mixed_changes_preserve_nonrepresentative_boards_in_either_order(self):
-        paths = ["main/application.cc", "main/boards/otto-robot/config.h"]
+    def test_mixed_changes_cover_both_boards_in_either_order(self):
+        paths = ["main/application.cc", "main/boards/waveshare/apple-lamp-ov2640/config.h"]
         for changes in (paths, list(reversed(paths))):
             with self.subTest(changes=changes):
                 selected = build._select_variants_for_changes(self.variants, changes)
-                self.assertEqual(len(selected), 19)
-                self.assertIn("otto-robot", {v["board"] for v in selected})
+                self.assertEqual(len(selected), 2)
+                self.assertIn("waveshare/apple-lamp-ov2640", {v["board"] for v in selected})
 
     def test_representative_board_changes_do_not_duplicate_default_build(self):
         selected = build._select_variants_for_changes(
             self.variants,
-            ["main/application.cc", "main/boards/bread-compact-wifi/config.h"],
+            ["main/application.cc", "main/boards/waveshare/apple-lamp-ov3660/config.h"],
         )
-        self.assertEqual(len(selected), 19)
+        self.assertEqual(len(selected), 2)
         self.assertEqual(
-            sorted(v["name"] for v in selected if v["board"] == "bread-compact-wifi"),
-            ["bread-compact-wifi", "bread-compact-wifi-128x64"],
+            sorted(v["name"] for v in selected if v["board"] == "waveshare/apple-lamp-ov3660"),
+            ["apple-lamp-ov3660-edge-runtime"],
         )
 
-    def test_ethernet_does_not_replace_changed_boards_wifi_variants(self):
-        selected = build._select_variants_for_changes(
-            self.variants,
-            ["main/application.cc", "main/boards/waveshare/esp32-p4-nano/config.h"],
-        )
-        nano = [v for v in selected if v["board"] == "waveshare/esp32-p4-nano"]
-        self.assertEqual(len(nano), 3)
-        self.assertEqual(sum(bool(v.get("ci_build_options")) for v in nano), 1)
-        self.assertEqual(len({v.get("ci_name", v["full_name"]) for v in nano}), 3)
+    def test_no_network_type_option_remains(self):
+        supported = [
+            v for v in self.variants
+            if any(d["key"] == "network_type" for d in v["build_options"])
+        ]
+        self.assertEqual(supported, [])
 
-    def test_full_selection_includes_every_default_and_ethernet(self):
+    def test_full_selection_includes_every_default(self):
         paths = ["main/application.cc"] + [
             f"main/boards/{board}/config.json"
             for board in {v["board"] for v in self.variants}
         ]
         selected = build._select_variants_for_changes(self.variants, paths)
-        self.assertEqual(len(selected), len(self.variants) + 1)
+        self.assertEqual(len(selected), len(self.variants))
         self.assertEqual(
-            {(v["board"], v["name"]) for v in selected if not v.get("ci_build_options")},
+            {(v["board"], v["name"]) for v in selected},
             {(v["board"], v["name"]) for v in self.variants},
         )
 
@@ -120,24 +118,9 @@ class CiSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported build option"):
             self.load_manifest(invalid)
         invalid = copy.deepcopy(self.manifest)
-        invalid["variants"][-1]["build_options"] = {"network_type": "typo"}
-        with self.assertRaisesRegex(ValueError, "must be one of"):
+        invalid["variants"][0]["build_options"] = {"camera_hmirror": "not-a-bool"}
+        with self.assertRaisesRegex(ValueError, "must be a boolean"):
             self.load_manifest(invalid)
-
-    def test_ethernet_option_is_scoped_and_emits_mutually_exclusive_config(self):
-        supported = [
-            v for v in self.variants
-            if any(d["key"] == "network_type" for d in v["build_options"])
-        ]
-        self.assertEqual({v["board"] for v in supported}, {"waveshare/esp32-p4-nano"})
-        for variant in supported:
-            definitions = variant["build_options"]
-            self.assertEqual(build._normalize_build_options(definitions, {})["network_type"], "wifi")
-            for selected in ("wifi", "ethernet"):
-                options = build._normalize_build_options(definitions, {"network_type": selected})
-                fragment = build._build_options_sdkconfig(definitions, options, {})
-                self.assertIn(f"CONFIG_XIAOZHI_NETWORK_WIFI={'y' if selected == 'wifi' else 'n'}", fragment)
-                self.assertIn(f"CONFIG_XIAOZHI_NETWORK_ETHERNET={'y' if selected == 'ethernet' else 'n'}", fragment)
 
 
 class WorkflowDiffTests(unittest.TestCase):
@@ -159,7 +142,7 @@ class WorkflowDiffTests(unittest.TestCase):
         self.commit_file("README.md")
         self.base = self.git("rev-parse", "HEAD")
         self.git("update-ref", "refs/remotes/origin/main", self.base)
-        workflow = (ROOT / ".github/workflows/build.yml").read_text()
+        workflow = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
         select = workflow.split("name: Select variants based on changes", 1)[1]
         self.script = textwrap.dedent(select.split("        run: |\n", 1)[1].split("\n  build:", 1)[0])
 
