@@ -5,6 +5,7 @@
 #include "custom_io_expander_ch32v003.h"
 #include "esp32_camera.h"
 #include "lamp_bridge.h"
+#include "lamp_delivery.h"
 #include "lamp_hardware_executor.h"
 #include "lamp_local_executor.h"
 #include "lamp_twin_web.h"
@@ -119,7 +120,9 @@ public:
         InitializeCamera();
 #if CONFIG_APPLE_LAMP_HARDWARE_MOTION
         lamp_executor_ = new LampHardwareExecutor();
-#if CONFIG_APPLE_LAMP_TWIN_WEB
+#if CONFIG_APPLE_LAMP_DELIVERY
+        ESP_LOGI(TAG, "Firmware role: XIAOZHI-DELIVERY; local web and UART, no startup motion");
+#elif CONFIG_APPLE_LAMP_TWIN_WEB
         ESP_LOGI(TAG, "Firmware role: LOCAL-TWIN; local web test panel, no startup motion");
 #else
         ESP_LOGI(TAG, "Firmware role: LOCAL-HARDWARE; operator enable required, no startup motion");
@@ -134,6 +137,10 @@ public:
         ESP_LOGI(TAG, "Firmware role: SIMULATOR-BRIDGE; servo UART disabled");
 #endif
         RegisterLampTools(*lamp_executor_);
+#if CONFIG_APPLE_LAMP_DELIVERY
+        StartLampDelivery(*static_cast<LampHardwareExecutor*>(lamp_executor_), camera_);
+        ESP_LOGI(TAG, "Firmware role: XIAOZHI-DELIVERY; no Edge Runtime, no startup motion");
+#endif
         // Board::GetDisplay() provides NoDisplay. No SPI panel/backlight exists.
         ESP_LOGI(
             TAG,

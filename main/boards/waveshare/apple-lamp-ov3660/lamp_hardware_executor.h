@@ -13,6 +13,12 @@ public:
                           const std::string& data);
     std::string Diagnostics(uint64_t after = 0);
     std::string PanelSubmit(const std::string& body);
+    std::string InstallationBinding();
+    uint32_t MotionEpoch() const { return epoch_.load(); }
+    void SetTeachingOwned(bool enabled);
+    std::string SubmitRelative(const std::string& actions, const std::string& end_mode, bool panel);
+    std::string SubmitTracking(const lamp::pose::Pose& measured, const lamp::pose::Pose& target,
+                               double duration, uint32_t expected_epoch);
     std::string PanelConfig(const std::string& candidate = "");
 
 private:
@@ -34,6 +40,7 @@ private:
     std::atomic<uint32_t> epoch_{0};
     bool armed_ = false;
     bool manual_ = false;
+    bool teaching_owned_ = false;
     std::optional<lamp::pose::Pose> last_target_;
     std::string SubmitChecked(const std::string& body, bool panel);
     bool SaveInstallation(const cJSON* mapping);

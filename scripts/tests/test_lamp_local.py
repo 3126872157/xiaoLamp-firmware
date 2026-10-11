@@ -55,11 +55,26 @@ class LocalBusTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
         for role, (name, marker) in module.ROLES.items():
             sdk = "CONFIG_APPLE_LAMP_LOCAL_EXECUTOR=y\nCONFIG_APPLE_LAMP_UART_PROBE=y\nCONFIG_COMPILER_CXX_EXCEPTIONS=y" if role != "simulator" else ""
-            if role in ("local-hardware", "local-twin"): sdk += "\nCONFIG_APPLE_LAMP_HARDWARE_MOTION=y"
-            if role == "local-twin": sdk += "\nCONFIG_APPLE_LAMP_TWIN_WEB=y"
+            if role in ("local-hardware", "local-twin", "xiaozhi-delivery"): sdk += "\nCONFIG_APPLE_LAMP_HARDWARE_MOTION=y"
+            if role in ("local-twin", "xiaozhi-delivery"): sdk += "\nCONFIG_APPLE_LAMP_TWIN_WEB=y"
             image = name.encode() + b"\0" + marker
+            if role == 'xiaozhi-delivery':
+                sdk += '\nCONFIG_APPLE_LAMP_DELIVERY=y\nCONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/v2/16m_lamp_delivery.csv"'
             module.validate_role(image, role, sdk)
             for other in module.ROLES:
                 if other == role: continue
                 with self.assertRaises(ValueError): module.validate_role(image, other, sdk)
                 with self.assertRaises(ValueError): module.validate_role(image + module.ROLES[other][1], role, sdk)
+
+    def test_delivery_flash_rejects_action_partition_before_serial(self):
+        import hashlib
+        spec=importlib.util.spec_from_file_location('lamp_guard',ROOT/'scripts/build_lamp_variant.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory(dir=ROOT/'build',prefix='delivery-guard-') as folder:
+            local=Path(folder);image=local/'payload.bin';image.write_bytes(b'payload')
+            manifest=local/'manifest.json'
+            manifest.write_text(json.dumps({'role':'xiaozhi-delivery','flash_files':[{'address':'0xf00000','file':'payload.bin','sha256':hashlib.sha256(image.read_bytes()).hexdigest()}],'write_flash_args':[]}),encoding='utf-8')
+            with patch.object(module.subprocess,'run') as run:
+                with self.assertRaisesRegex(ValueError,'overlaps user action partition'):
+                    module.flash(manifest,'xiaozhi-delivery','NO_DEVICE')
+                run.assert_not_called()

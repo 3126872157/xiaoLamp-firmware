@@ -22,6 +22,7 @@ class Esp32Camera : public Camera {
 private:
     bool streaming_on_ = false;
     bool swap_bytes_enabled_ = true;  // Swap pixel byte order for RGB565, enabled by default
+    std::mutex configuration_mutex_;
     std::string explain_url_;
     std::string explain_token_;
     std::thread encoder_thread_;
@@ -33,6 +34,10 @@ public:
     Esp32Camera(const camera_config_t& config);
     ~Esp32Camera();
 
+#if CONFIG_APPLE_LAMP_DELIVERY
+    std::expected<std::string, std::string> CaptureAndExplain(const std::string& question,
+                                                              Preview preview = {}) override;
+#endif
     virtual void SetExplainUrl(const std::string& url, const std::string& token) override;
     virtual bool Capture() override;
     virtual bool SetHMirror(bool enabled) override;

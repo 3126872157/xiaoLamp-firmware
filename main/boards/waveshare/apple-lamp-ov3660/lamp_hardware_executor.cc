@@ -11,6 +11,7 @@
 #include <numbers>
 #include "application.h"
 #include "lamp_bus_protocol.h"
+#include "lamp_delivery_model.h"
 #include "lamp_pose_model.h"
 namespace {
 const cJSON* Item(const cJSON* o, const char* key) {
@@ -392,6 +393,8 @@ std::string LampHardwareExecutor::PanelSubmit(const std::string& body) {
         std::lock_guard lock(mutex_);
         if (!queued_.empty() || !active_.empty())
             return Error("BUSY", "Wait for task completion or stop first");
+        if (teaching_owned_)
+            return Error("TEACHING_ACTIVE", "End teaching before changing control ownership");
         manual_ = op == "acquire";
         armed_ = false;
         rest_at_ = 0;
@@ -420,6 +423,59 @@ std::string LampHardwareExecutor::PanelSubmit(const std::string& body) {
     if (!valid)
         return Error("INVALID_REQUEST", "Unsupported panel operation or invalid parameters");
     return SubmitChecked(body, true);
+}
+std::string LampHardwareExecutor::InstallationBinding() {
+    std::lock_guard lock(mutex_);
+    return configuration_ ? TeachingBinding(configuration_->source.get()) : "";
+}
+void LampHardwareExecutor::SetTeachingOwned(bool enabled) {
+    std::lock_guard lock(mutex_);
+    teaching_owned_ = enabled;
+    if (enabled)
+        manual_ = true;
+    armed_ = false;
+    rest_at_ = 0;
+}
+std::string LampHardwareExecutor::SubmitRelative(const std::string& actions,
+                                                 const std::string& end_mode, bool panel) {
+    CJsonUniquePtr a(cJSON_Parse(actions.c_str()));
+    if (!cJSON_IsArray(a.get()) || cJSON_GetArraySize(a.get()) < 1 ||
+        cJSON_GetArraySize(a.get()) > 16 || actions.size() > lamp::kMaxCommandBytes - 1024 ||
+        (end_mode != "hold_at_end" && end_mode != "return_to_reference"))
+        return Error("INVALID_REQUEST", "Expected 1-16 bounded actions and valid end_mode");
+    const auto binding = InstallationBinding();
+    for (auto* p = a->child; p; p = p->next) {
+        auto parsed = lamp::delivery::ParseAction(lamp::Encode(p));
+        if (!parsed || binding.empty() || parsed->binding != binding)
+            return Error("INVALID_ACTION",
+                         parsed ? "Installation binding mismatch" : parsed.error());
+    }
+    CJsonUniquePtr o(cJSON_CreateObject());
+    cJSON_AddStringToObject(o.get(), "request_id", NewRequestId().c_str());
+    cJSON_AddStringToObject(o.get(), "operation", "play_relative");
+    auto* args = cJSON_AddObjectToObject(o.get(), "args");
+    cJSON_AddItemToObject(args, "actions", a.release());
+    cJSON_AddStringToObject(args, "end_mode", end_mode.c_str());
+    return SubmitChecked(lamp::Encode(o.get()), panel);
+}
+std::string LampHardwareExecutor::SubmitTracking(const lamp::pose::Pose& measured,
+                                                 const lamp::pose::Pose& target, double duration,
+                                                 uint32_t expected_epoch) {
+    if (!std::isfinite(duration) || duration < .5 || duration > 5)
+        return Error("INVALID_REQUEST", "Invalid tracking duration");
+    CJsonUniquePtr o(cJSON_CreateObject());
+    cJSON_AddStringToObject(o.get(), "request_id", NewRequestId().c_str());
+    cJSON_AddStringToObject(o.get(), "operation", "tracking_move");
+    auto* args = cJSON_AddObjectToObject(o.get(), "args");
+    for (auto key : {"measured", "pose_rad"}) {
+        const auto& q = std::string(key) == "measured" ? measured : target;
+        auto* p = cJSON_AddObjectToObject(args, key);
+        for (int i = 0; i < 5; ++i)
+            cJSON_AddNumberToObject(p, lamp::pose::kNames[i], q[i]);
+    }
+    cJSON_AddNumberToObject(args, "duration_sec", duration);
+    cJSON_AddNumberToObject(args, "expected_epoch", expected_epoch);
+    return SubmitChecked(lamp::Encode(o.get()), false);
 }
 bool LampHardwareExecutor::Ready() {
     std::lock_guard lock(mutex_);
@@ -480,6 +536,13 @@ std::string LampHardwareExecutor::SubmitChecked(const std::string& body, bool pa
     if (!live_ || (!configuration_ && !emergency && !(panel && op == "install")))
         return Error("UNAVAILABLE",
                      configuration_error_.empty() ? setup_error_ : configuration_error_);
+    if (teaching_owned_ && !emergency)
+        return Error("TEACHING_ACTIVE", "Teaching is read-only; end it before enabling or moving");
+    if (op == "tracking_move") {
+        const auto* e = Item(args, "expected_epoch");
+        if (!cJSON_IsNumber(e) || e->valuedouble != epoch_.load())
+            return Error("STALE_OBSERVATION", "Control changed after image capture");
+    }
     if (!panel && manual_ && !emergency)
         return Error("MANUAL_CONTROL", "Web test panel owns motion; release manual control first");
     if (panel && !manual_ && !emergency)
@@ -534,6 +597,7 @@ std::string LampHardwareExecutor::State() {
     cJSON_AddStringToObject(o.get(), "api_version", "lamp-twin/1");
     cJSON_AddStringToObject(o.get(), "pose_space", "urdf_rad");
     cJSON_AddBoolToObject(o.get(), "manual_control", manual_);
+    cJSON_AddBoolToObject(o.get(), "teaching_active", teaching_owned_);
     if (last_target_) {
         auto* pose = cJSON_AddObjectToObject(o.get(), "target_pose_rad");
         for (unsigned i = 0; i < 5; i++)
@@ -993,7 +1057,82 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
                                      : io_error_);
             return;
         }
-    if (op == "move") {
+    if (op == "play_relative") {
+        lamp::pose::Plan combined;
+        combined.entry = current;
+        auto reference = current;
+        for (const auto* a = Item(args, "actions")->child; a; a = a->next) {
+            auto action = lamp::delivery::ParseAction(lamp::Encode(a));
+            if (!action || action->binding != InstallationBinding()) {
+                reject("Action or installation changed before playback");
+                return;
+            }
+            auto plan = lamp::delivery::RelativePlan(*action, *configuration_, reference,
+                                                     lamp::Text(args, "end_mode"));
+            if (!plan) {
+                reject(plan.error());
+                return;
+            }
+            combined.phases.insert(combined.phases.end(), plan->phases.begin(), plan->phases.end());
+            reference = plan->At(plan->Duration());
+        }
+        if (combined.Duration() > 60) {
+            reject("Custom group exceeds 60 seconds");
+            return;
+        }
+        for (const auto& phase : combined.phases)
+            for (unsigned n = 0; n <= 120; ++n) {
+                const auto ticks = lamp::pose::ToTicks(*configuration_, phase.At(double(n) / 120));
+                bool valid = ticks.has_value();
+                if (ticks)
+                    for (int j = 0; j < 5; ++j)
+                        valid &= (*ticks)[j] >= servos_[j].limit_min &&
+                                 (*ticks)[j] <= servos_[j].limit_max;
+                if (!valid) {
+                    reject("Custom group exceeds device limits; no motion sent");
+                    return;
+                }
+            }
+        combined.ok = true;
+        {
+            std::lock_guard lock(mutex_);
+            records_.at(id).total = combined.phases.size();
+        }
+        if (!Play(combined, token)) {
+            failure(io_error_.empty() ? "Relative playback failed" : io_error_);
+            return;
+        }
+        {
+            std::lock_guard lock(mutex_);
+            records_.at(id).step = combined.phases.size();
+        }
+        Finish(id, "completed", "Relative group confirmed from physical feedback");
+        return;
+    }
+    if (op == "tracking_move") {
+        auto measured = lamp::pose::ParsePose(Item(args, "measured"));
+        auto target = lamp::pose::ParsePose(Item(args, "pose_rad"));
+        if (!measured || !target) {
+            reject("Invalid tracking pose");
+            return;
+        }
+        for (int j = 0; j < 5; ++j) {
+            if (std::abs(current[j] - (*measured)[j]) > .8 * std::numbers::pi / 180 ||
+                std::abs((*target)[j] - (*measured)[j]) >
+                    (j == 0 || j == 3 ? 3.01 : 0.001) * std::numbers::pi / 180) {
+                reject("Stale capture pose or excessive tracking step");
+                return;
+            }
+        }
+        for (int j : {0, 3}) {
+            const auto r = configuration_->modes[mode_].ranges[j];
+            if ((*target)[j] < r.min || (*target)[j] > r.max) {
+                reject("Tracking target exceeds current posture envelope");
+                return;
+            }
+        }
+    }
+    if (op == "move" || op == "tracking_move") {
         auto target = lamp::pose::ParsePose(Item(args, "pose_rad"));
         lamp::pose::Plan plan;
         if (!target || !lamp::pose::ToTicks(*configuration_, *target)) {

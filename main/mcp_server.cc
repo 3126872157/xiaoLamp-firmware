@@ -103,11 +103,8 @@ void McpServer::AddCommonTools() {
                     // Lower the priority to do the camera capture
                     TaskPriorityReset priority_reset(1);
 
-                    if (!camera->Capture()) {
-                        return std::unexpected("Failed to capture photo");
-                    }
                     auto question = properties["question"].value<std::string>();
-                    auto result = camera->Explain(question);
+                    auto result = camera->CaptureAndExplain(question);
                     if (!result) {
                         return std::unexpected(std::move(result.error()));
                     }

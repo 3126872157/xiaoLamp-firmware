@@ -24,7 +24,7 @@ class HardwareExecutorTests(unittest.TestCase):
                                '-I',str(BOARD),'-I',str(cjson),
                                str(ROOT/'scripts/tests/lamp_hardware_cli.cc'),
                                *[str(BOARD/name) for name in ['lamp_hardware_executor.cc','lamp_local_executor.cc',
-                                  'lamp_bus_protocol.cc','lamp_pose_plan.cc','lamp_protocol.cc']],
+                                  'lamp_bus_protocol.cc','lamp_pose_plan.cc','lamp_protocol.cc','lamp_delivery_model.cc']],
                                str(cjson/'cJSON.c'),'-o',str(binary)],capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
         result=subprocess.run([str(binary)],capture_output=True,text=True,timeout=30)

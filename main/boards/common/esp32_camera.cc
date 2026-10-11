@@ -69,6 +69,7 @@ Esp32Camera::~Esp32Camera() {
 }
 
 void Esp32Camera::SetExplainUrl(const std::string& url, const std::string& token) {
+    std::lock_guard lock(configuration_mutex_);
     explain_url_ = url;
     explain_token_ = token;
 }
@@ -387,3 +388,154 @@ std::expected<std::string, std::string> Esp32Camera::Explain(const std::string& 
              question.c_str(), result.c_str());
     return result;
 }
+
+#if CONFIG_APPLE_LAMP_DELIVERY
+#include <esp_crt_bundle.h>
+#include <esp_http_client.h>
+#include <algorithm>
+std::expected<std::string, std::string> Esp32Camera::CaptureAndExplain(const std::string& question,
+                                                                       Preview preview) {
+    // Serialize a complete capture/upload with the ordinary MCP photo tool.
+    std::lock_guard observation_lock(observation_mutex_);
+    if (observation_paused_)
+        return std::unexpected("Camera paused by operator teaching");
+    std::string url, token;
+    {
+        std::lock_guard lock(configuration_mutex_);
+        url = explain_url_;
+        token = explain_token_;
+    }
+    if (url.empty())
+        return std::unexpected("Vision URL/token not initialized: open Xiaozhi conversation first");
+    if (!url.starts_with("https://") && !url.starts_with("http://"))
+        return std::unexpected("Unsupported vision URL");
+    if (question.empty() || question.size() > 1024)
+        return std::unexpected("Vision question too long");
+    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < 32768 ||
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) < 8192)
+        return std::unexpected("Insufficient internal heap for vision; retry after audio is idle");
+    if (!Capture())
+        return std::unexpected("Camera capture failed");
+    constexpr size_t limit = 65536;
+    auto* jpeg =
+        static_cast<uint8_t*>(heap_caps_malloc(limit, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!jpeg)
+        return std::unexpected("JPEG PSRAM allocation failed");
+    struct Jpeg {
+        uint8_t* bytes;
+        size_t size = 0;
+        bool overflow = false;
+    } data{jpeg};
+    bool encoded = false;
+    if (current_fb_->format == PIXFORMAT_JPEG) {
+        if (current_fb_->len <= limit) {
+            memcpy(jpeg, current_fb_->buf, current_fb_->len);
+            data.size = current_fb_->len;
+            encoded = true;
+        }
+    } else if (current_fb_->format == PIXFORMAT_RGB565 && encode_buf_) {
+        encoded = image_to_jpeg_cb(
+            encode_buf_, encode_buf_size_, current_fb_->width, current_fb_->height,
+            V4L2_PIX_FMT_RGB565, 65,
+            [](void* arg, size_t, const void* bytes, size_t len) -> size_t {
+                auto* j = static_cast<Jpeg*>(arg);
+                if (!bytes || !len)
+                    return len;
+                if (j->size + len > limit) {
+                    j->overflow = true;
+                    return 0;
+                }
+                memcpy(j->bytes + j->size, bytes, len);
+                j->size += len;
+                return len;
+            },
+            &data);
+    }
+    if (!encoded || data.overflow || data.size < 4) {
+        heap_caps_free(jpeg);
+        return std::unexpected("JPEG encode failed/over 64 KiB");
+    }
+    if (preview)
+        preview(jpeg, data.size);
+    const std::string boundary = "----LAMP_VISION_REQUEST";
+    const std::string head = "--" + boundary +
+                             "\r\nContent-Disposition: form-data; name=\"question\"\r\n\r\n" +
+                             question + "\r\n--" + boundary +
+                             "\r\nContent-Disposition: form-data; name=\"file\"; "
+                             "filename=\"camera.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n";
+    const std::string tail = "\r\n--" + boundary + "--\r\n";
+    esp_http_client_config_t cfg{};
+    cfg.url = url.c_str();
+    cfg.timeout_ms = 5000;
+    cfg.disable_auto_redirect = true;
+#if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+#endif
+    auto http = esp_http_client_init(&cfg);
+    if (!http) {
+        heap_caps_free(jpeg);
+        return std::unexpected("Vision HTTP allocation failed");
+    }
+    const auto deadline = esp_timer_get_time() + 20000000;
+    std::string error, response;
+    esp_http_client_set_method(http, HTTP_METHOD_POST);
+    esp_http_client_set_header(http, "Device-Id", SystemInfo::GetMacAddress().c_str());
+    esp_http_client_set_header(http, "Client-Id", Board::GetInstance().GetUuid().c_str());
+    const auto auth = "Bearer " + token;
+    if (!token.empty())
+        esp_http_client_set_header(http, "Authorization", auth.c_str());
+    esp_http_client_set_header(http, "Content-Type",
+                               ("multipart/form-data; boundary=" + boundary).c_str());
+    auto write = [&](const void* ptr, size_t len) {
+        const auto* bytes = static_cast<const char*>(ptr);
+        while (len) {
+            if (esp_timer_get_time() > deadline)
+                return false;
+            const int n = esp_http_client_write(http, bytes, std::min(len, size_t(4096)));
+            if (n <= 0)
+                return false;
+            bytes += n;
+            len -= n;
+        }
+        return true;
+    };
+    if (esp_http_client_open(http, head.size() + data.size + tail.size()) != ESP_OK)
+        error = "Vision connection failed";
+    else if (!write(head.data(), head.size()) || !write(jpeg, data.size) ||
+             !write(tail.data(), tail.size()))
+        error = "Vision upload failed/timeout";
+    heap_caps_free(jpeg);
+    if (error.empty()) {
+        const auto headers = esp_http_client_fetch_headers(http);
+        const int status = esp_http_client_get_status_code(http);
+        if (headers < 0 || status != 200)
+            error = "Vision HTTP " + std::to_string(status) + "; verify service credentials/quota";
+        else {
+            char buffer[768];
+            while (esp_timer_get_time() < deadline) {
+                const int n = esp_http_client_read(http, buffer, sizeof(buffer));
+                if (n < 0) {
+                    error = "Vision response read failed";
+                    break;
+                }
+                if (!n) {
+                    if (!esp_http_client_is_complete_data_received(http))
+                        error = "Incomplete vision response";
+                    break;
+                }
+                if (response.size() + n > 8192) {
+                    error = "Vision response exceeds 8 KiB";
+                    break;
+                }
+                response.append(buffer, n);
+            }
+            if (esp_timer_get_time() >= deadline)
+                error = "Vision request timed out";
+        }
+    }
+    esp_http_client_close(http);
+    esp_http_client_cleanup(http);
+    return error.empty() ? std::expected<std::string, std::string>(std::move(response))
+                         : std::unexpected(error);
+}
+#endif

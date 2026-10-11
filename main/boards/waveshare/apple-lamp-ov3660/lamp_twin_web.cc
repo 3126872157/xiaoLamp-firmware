@@ -6,8 +6,12 @@
 #include <esp_random.h>
 #include <cstring>
 #include <string>
+#include "lamp_delivery.h"
 #include "lamp_twin_page.h"
 #include "lamp_twin_web.h"
+#if CONFIG_APPLE_LAMP_DELIVERY
+#include "lamp_delivery_page.h"
+#endif
 namespace {
 httpd_handle_t server = nullptr;
 LampHardwareExecutor* device = nullptr;
@@ -30,12 +34,16 @@ esp_err_t Json(httpd_req_t* req, const std::string& data) {
 esp_err_t Page(httpd_req_t* req) {
     std::string page = kLampTwinPage;
     page.replace(page.find("__TOKEN__"), 9, secret);
+#if CONFIG_APPLE_LAMP_DELIVERY
+    page.insert(page.find("</main>"), kLampDeliveryMarkup);
+    page.insert(page.find("</html>"), kLampDeliveryScript);
+#endif
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
     httpd_resp_set_hdr(req, "Content-Security-Policy",
                        "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-                       "frame-ancestors 'none'; connect-src 'self'");
+                       "frame-ancestors 'none'; connect-src 'self'; img-src 'self' blob:");
     return httpd_resp_send(req, page.data(), page.size());
 }
 esp_err_t Api(httpd_req_t* req) {
@@ -53,6 +61,22 @@ esp_err_t Api(httpd_req_t* req) {
     std::string path(req->uri);
     path = path.substr(0, path.find('?'));
     if (req->method == HTTP_GET) {
+#if CONFIG_APPLE_LAMP_DELIVERY
+        if (path == "/api/lamp/delivery")
+            return Json(req, LampDeliveryState());
+        if (path.starts_with("/api/lamp/delivery/jobs/"))
+            return Json(req, LampDeliveryJob(path.substr(24)));
+        if (path == "/api/lamp/delivery/jpeg") {
+            esp_err_t result = ESP_FAIL;
+            const bool found = LampDeliveryJpeg([&](const uint8_t* bytes, size_t length) {
+                httpd_resp_set_type(req, "image/jpeg");
+                httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+                result = httpd_resp_send(req, reinterpret_cast<const char*>(bytes), length);
+            });
+            return found ? result
+                         : Json(req, "{\"ok\":false,\"error\":{\"message\":\"No preview yet\"}}");
+        }
+#endif
         if (path == "/api/lamp/history") {
             char query[64]{}, value[24]{};
             uint64_t after = 0;
@@ -79,7 +103,8 @@ esp_err_t Api(httpd_req_t* req) {
             return Json(req, device->Inspect(id));
         }
     } else if (req->method == HTTP_POST) {
-        if (req->content_len <= 0 || req->content_len > 2048 ||
+        if (req->content_len <= 0 ||
+            req->content_len > (path == "/api/lamp/delivery" ? 16384 : 2048) ||
             !Header(req, "Content-Type").starts_with("application/json")) {
             httpd_resp_set_status(req, "400 Bad Request");
             return Json(req,
@@ -93,6 +118,10 @@ esp_err_t Api(httpd_req_t* req) {
                 return ESP_FAIL;
             received += n;
         }
+#if CONFIG_APPLE_LAMP_DELIVERY
+        if (path == "/api/lamp/delivery")
+            return Json(req, LampDeliverySubmit(body, true));
+#endif
         if (path == "/api/lamp/calibration/preview")
             return Json(req, device->PanelConfig(body));
         if (path == "/api/lamp/command")

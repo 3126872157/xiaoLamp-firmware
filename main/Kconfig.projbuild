@@ -1176,6 +1176,11 @@ menu "Apple Lamp execution backend"
         help
             Real CMD1/12/29/31 output, explicit operator enable, local plans and NVS calibration.
             Distinct hardware firmware identity; no automatic movement at boot.
+    config APPLE_LAMP_DELIVERY
+        bool "Xiaozhi lamp delivery: incremental teaching and low-frequency tracking"
+        depends on APPLE_LAMP_HARDWARE_MOTION && APPLE_LAMP_TWIN_WEB
+        default n
+
     config APPLE_LAMP_TWIN_WEB
         bool "Embedded LAN twin test and installation calibration page"
         depends on APPLE_LAMP_HARDWARE_MOTION

@@ -9,6 +9,7 @@
 #include <mutex>
 #include <thread>
 #include "lamp_bus_protocol.h"
+#include "lamp_delivery_model.h"
 #include "lamp_hardware_executor.h"
 #include "lamp_hardware_platform.h"
 #include "lamp_pose_model.h"
@@ -483,6 +484,35 @@ int main() {
                                 cJSON_GetArrayItem(rawq, i)->valuedouble + (i == 3 ? .02 : 0));
     call("move-web", "move", "{\"pose_rad\":" + lamp::Encode(q.get()) + ",\"duration_sec\":0.3}");
     assert(Wait(*panel, "move-web") == "completed");
+    lamp::delivery::Action custom;
+    custom.id = "nod";
+    custom.name = "Nod";
+    custom.description = "Agree";
+    custom.binding = panel->InstallationBinding();
+    custom.joints[3] = true;
+    lamp::delivery::Segment segment;
+    segment.delta[3] = .02;
+    segment.seconds = .2;
+    custom.segments.push_back(segment);
+    const auto action_json = "[" + lamp::delivery::EncodeAction(custom) + "]";
+    auto relative = Json(panel->SubmitRelative(action_json, "return_to_reference", true));
+    assert(cJSON_IsTrue(Item(relative.get(), "ok")));
+    assert(Wait(*panel, lamp::Text(Item(relative.get(), "result"), "request_id")) == "completed");
+    custom.binding = std::string(64, '0');
+    auto mismatch = Json(panel->SubmitRelative("[" + lamp::delivery::EncodeAction(custom) + "]",
+                                               "hold_at_end", true));
+    assert(cJSON_IsFalse(Item(mismatch.get(), "ok")));
+    panel->SetTeachingOwned(true);
+    auto teach_enable = Json(panel->PanelSubmit(
+        R"({"request_id":"teach-enable","operation":"set_torque","args":{"enabled":true}})"));
+    assert(lamp::Text(Item(teach_enable.get(), "error"), "code") == "TEACHING_ACTIVE");
+    auto teach_move = Json(panel->PanelSubmit(
+        "{\"request_id\":\"teach-move\",\"operation\":\"move\",\"args\":{\"pose_rad\":" +
+        lamp::Encode(q.get()) + ",\"duration_sec\":1}}"));
+    assert(lamp::Text(Item(teach_move.get(), "error"), "code") == "TEACHING_ACTIVE");
+    panel->SetTeachingOwned(false);
+    call("resume-custom-test", "set_torque", R"({"enabled":true})");
+    assert(Wait(*panel, "resume-custom-test") == "completed");
     call("install-energized", "install", "{\"mapping\":" + mapping + ",\"clear_targets\":true}");
     assert(Wait(*panel, "install-energized") == "failed");
     call("off-last", "set_torque", R"({"enabled":false})");
