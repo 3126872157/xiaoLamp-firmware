@@ -216,7 +216,8 @@ python scripts/build_lamp_variant.py --board apple-lamp-ov2640 --role local-twin
 python scripts/build_lamp_variant.py --board apple-lamp-ov2640 --role xiaozhi-delivery
 ```
 
-`xiaozhi-delivery` 角色启用增量示教、Flash 动作库与低频跟书，使用独立分区表
+`xiaozhi-delivery` 角色启用增量示教与 Flash 动作库；跟书仍是不完善的实验功能，
+不能作为交付能力。该角色使用独立分区表
 `partitions/v2/16m_lamp_delivery.csv`（assets 7MiB + `lamp_actions` 1MiB）；迁移与验收见
 [交付指引](../../../../docs/apple-lamp-xiaozhi-delivery.md)。
 

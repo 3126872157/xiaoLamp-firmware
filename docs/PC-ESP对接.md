@@ -71,13 +71,16 @@ Node 服务定时轮询以下 GET 端点，并把最新快照推给浏览器 UI�
 
 轮询周期建议：UI 展示 500ms–1s；示教关键帧采样按需（见 §7）。
 
-### 4.2 交付状态（已有，delivery 角色）
+### 4.2 交付状态（已有接口；跟书字段仅供实验）
 
 `GET /api/lamp/delivery`
 
 返回：`storage_ready`、`actions[]`（动作目录，含 `id/name/description/valid/compatible`）、
 `teaching_status`、`frames[]`（当前草稿关键帧）、`tracking_status`、`catalog_revision`、
 存储用量等。
+
+`tracking_status`、JPEG 和跟书相关字段来自尚未完成的实验实现，跟书不能作为当前
+交付或课程能力。动作库和示教状态可以按本文其他章节使用。
 
 ### 4.3 其他查询端点（已有）
 
@@ -115,7 +118,7 @@ PC 对接需新增两个端点：
 
 - 核心 10：`list_primitives`、`run_sequence`、`get_state`、`stop`、`execute_action`、
   `end_lighting`、`rest`、`release_torque`、`enable_torque`、`record_calibration`
-- 交付 5：`list_user_actions`、`play_user_actions`、`get_delivery_state`、
+  - 交付 5（其中跟书两个工具仅为实验接口，不代表可交付能力）：`list_user_actions`、`play_user_actions`、`get_delivery_state`、
   `start_book_tracking`、`stop_book_tracking`
 
 > 技能列表在启动时确定；`list_user_actions` 返回的动作目录是**动态数据**（示教新增后即时变化），

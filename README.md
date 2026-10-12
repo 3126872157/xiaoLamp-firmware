@@ -1,6 +1,11 @@
 # Apple Lamp · 小智0.1交付候选
 
-当前分支 `codex/xiaozhi-v0.1-delivery` 基于 `apple-lamp-v0.1`，新增增量示教、独立Flash动作库和低频跟书。构建角色 `xiaozhi-delivery`，局域网测试页8080。没有引入Edge Runtime；尚待实机验收。使用与测试见 [交付指引](docs/apple-lamp-xiaozhi-delivery.md)。
+当前分支 `codex/xiaozhi-v0.1-delivery` 基于 `apple-lamp-v0.1`，新增增量示教和独立Flash动作库；跟书仍是不完善的实验功能，不能作为交付能力。构建角色 `xiaozhi-delivery`，局域网测试页8080。没有引入Edge Runtime；尚待实机验收。
+
+- [OV2640 delivery 架构说明](docs/apple-lamp-ov2640-architecture.md)
+- [OV2640 delivery 使用说明](docs/apple-lamp-ov2640-user-guide.md)
+- [台灯软件交接补充说明](交接补充说明.md)
+- [交付指引与验收记录](docs/apple-lamp-xiaozhi-delivery.md)
 
 # An MCP-based Chatbot
 
