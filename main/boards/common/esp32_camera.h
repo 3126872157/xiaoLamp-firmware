@@ -29,6 +29,11 @@ private:
     camera_fb_t* current_fb_ = nullptr;
     uint8_t* encode_buf_ = nullptr;  // Buffer for JPEG encoding (with optional byte swap)
     size_t encode_buf_size_ = 0;
+#if CONFIG_APPLE_LAMP_DELIVERY
+    // One dedicated PSRAM image workspace, reserved before conversations start.
+    // observation_mutex_ serializes all users; every capture overwrites it.
+    uint8_t* vision_jpeg_ = nullptr;
+#endif
 
 public:
     Esp32Camera(const camera_config_t& config);

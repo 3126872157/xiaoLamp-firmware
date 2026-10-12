@@ -17,6 +17,7 @@
 #include <map>
 #include <numbers>
 #include "application.h"
+#include "boards/common/camera_vision_memory.h"
 #include "lamp_delivery.h"
 #include "lamp_delivery_model.h"
 #include "lamp_pose_model.h"
@@ -344,8 +345,9 @@ private:
         if (app.IsVoiceDetected() || app.GetDeviceState() == kDeviceStateSpeaking)
             return Error("Wait for audio to be idle before writing Flash");
         if (!ready_)
-            return Error("Action partition is not initialized; use 'Initialize/Clear action "
-                         "partition' first");
+            return Error(
+                "Action partition is not initialized; use 'Initialize/Clear action "
+                "partition' first");
         const auto data = lamp::delivery::EncodeAction(a);
         auto valid = lamp::delivery::ParseAction(data);
         if (!valid)
@@ -694,8 +696,14 @@ private:
             });
         if (gen != generation_.load() || epoch != hw_.MotionEpoch())
             return Error("Observation discarded: cancelled/control changed");
-        if (!response)
+        if (!response) {
+            if (move && camera_vision::Deferred(response.error())) {
+                tracking_status_ = "waiting_memory";
+                hw_.RecordDiagnostic("vision_deferred", "book_tracking", response.error());
+                return "{\"ok\":true,\"deferred\":true,\"moving\":false}";
+            }
             return Error(response.error());
+        }
         size_t preview_length = std::min(response->size(), size_t(1024));
         while (preview_length < response->size() && preview_length > 0 &&
                (static_cast<unsigned char>((*response)[preview_length]) & 0xc0) == 0x80)
@@ -797,6 +805,12 @@ private:
             return;
         }
         CJsonUniquePtr result(cJSON_Parse(Observe(true).c_str()));
+        if (cJSON_IsTrue(Get(result.get(), "deferred"))) {
+            // Resource contention is neither a cloud failure nor a fresh observation.
+            // Preserve previous failure count and retry at the configured bounded rate.
+            next_capture_ = esp_timer_get_time() + int64_t(options_.interval * 1e6);
+            return;
+        }
         if (!Good(result.get())) {
             error_ = lamp::Text(Get(result.get(), "error"), "message");
             tracking_status_ = "retry_wait";

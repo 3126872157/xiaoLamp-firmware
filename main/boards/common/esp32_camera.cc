@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "board.h"
+#include "camera_vision_memory.h"
 #include "display.h"
 #include "esp32_camera.h"
 #include "esp_timer.h"
@@ -49,10 +50,20 @@ Esp32Camera::Esp32Camera(const camera_config_t& config) {
         ESP_LOGI(TAG, "Camera initialized: format=%d", config.pixel_format);
     }
 
+#if CONFIG_APPLE_LAMP_DELIVERY
+    vision_jpeg_ = static_cast<uint8_t*>(
+        heap_caps_malloc(camera_vision::kJpegBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!vision_jpeg_)
+        ESP_LOGW(TAG, "Vision PSRAM workspace unavailable; capture will retry allocation");
+#endif
     streaming_on_ = true;
 }
 
 Esp32Camera::~Esp32Camera() {
+#if CONFIG_APPLE_LAMP_DELIVERY
+    heap_caps_free(vision_jpeg_);
+    vision_jpeg_ = nullptr;
+#endif
     if (streaming_on_) {
         if (current_fb_) {
             esp_camera_fb_return(current_fb_);
@@ -411,16 +422,34 @@ std::expected<std::string, std::string> Esp32Camera::CaptureAndExplain(const std
         return std::unexpected("Unsupported vision URL");
     if (question.empty() || question.size() > 1024)
         return std::unexpected("Vision question too long");
-    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < 32768 ||
-        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) < 8192)
-        return std::unexpected("Insufficient internal heap for vision; retry after audio is idle");
+    struct HeapTrace {
+        size_t internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        size_t psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        ~HeapTrace() {
+            ESP_LOGI(
+                TAG, "Vision heap internal=%u->%u largest=%u->%u PSRAM=%u->%u", unsigned(internal),
+                unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                unsigned(largest),
+                unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                unsigned(psram), unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+        }
+    } trace;
+    if (!camera_vision::CanStart(trace.internal, trace.largest))
+        return std::unexpected("Vision deferred: internal_free=" + std::to_string(trace.internal) +
+                               "; largest_block=" + std::to_string(trace.largest) +
+                               "; need reserve=" + std::to_string(camera_vision::kInternalReserve) +
+                               ", block=" + std::to_string(camera_vision::kLargestControlBlock) +
+                               "; audio idle does not guarantee memory");
     if (!Capture())
         return std::unexpected("Camera capture failed");
-    constexpr size_t limit = 65536;
-    auto* jpeg =
-        static_cast<uint8_t*>(heap_caps_malloc(limit, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    constexpr size_t limit = camera_vision::kJpegBytes;
+    if (!vision_jpeg_)
+        vision_jpeg_ =
+            static_cast<uint8_t*>(heap_caps_malloc(limit, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    auto* jpeg = vision_jpeg_;
     if (!jpeg)
-        return std::unexpected("JPEG PSRAM allocation failed");
+        return std::unexpected("JPEG PSRAM workspace allocation failed");
     struct Jpeg {
         uint8_t* bytes;
         size_t size = 0;
@@ -452,7 +481,6 @@ std::expected<std::string, std::string> Esp32Camera::CaptureAndExplain(const std
             &data);
     }
     if (!encoded || data.overflow || data.size < 4) {
-        heap_caps_free(jpeg);
         return std::unexpected("JPEG encode failed/over 64 KiB");
     }
     if (preview)
@@ -467,17 +495,23 @@ std::expected<std::string, std::string> Esp32Camera::CaptureAndExplain(const std
     esp_http_client_config_t cfg{};
     cfg.url = url.c_str();
     cfg.timeout_ms = 5000;
+    // IDF uses malloc for these buffers. In the delivery variants allocations
+    // above ALWAYSINTERNAL go to PSRAM, unlike its default 512-byte buffers.
+#if CONFIG_SPIRAM_USE_MALLOC
+    cfg.buffer_size = std::max(size_t(2048), size_t(CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL) + 1);
+    cfg.buffer_size_tx = cfg.buffer_size;
+#endif
     cfg.disable_auto_redirect = true;
 #if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
 #endif
     auto http = esp_http_client_init(&cfg);
     if (!http) {
-        heap_caps_free(jpeg);
         return std::unexpected("Vision HTTP allocation failed");
     }
     const auto deadline = esp_timer_get_time() + 20000000;
     std::string error, response;
+    response.reserve(camera_vision::kResponseBytes);
     esp_http_client_set_method(http, HTTP_METHOD_POST);
     esp_http_client_set_header(http, "Device-Id", SystemInfo::GetMacAddress().c_str());
     esp_http_client_set_header(http, "Client-Id", Board::GetInstance().GetUuid().c_str());
@@ -504,7 +538,6 @@ std::expected<std::string, std::string> Esp32Camera::CaptureAndExplain(const std
     else if (!write(head.data(), head.size()) || !write(jpeg, data.size) ||
              !write(tail.data(), tail.size()))
         error = "Vision upload failed/timeout";
-    heap_caps_free(jpeg);
     if (error.empty()) {
         const auto headers = esp_http_client_fetch_headers(http);
         const int status = esp_http_client_get_status_code(http);
@@ -523,7 +556,7 @@ std::expected<std::string, std::string> Esp32Camera::CaptureAndExplain(const std
                         error = "Incomplete vision response";
                     break;
                 }
-                if (response.size() + n > 8192) {
+                if (response.size() + n > camera_vision::kResponseBytes) {
                     error = "Vision response exceeds 8 KiB";
                     break;
                 }

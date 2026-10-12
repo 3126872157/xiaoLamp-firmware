@@ -21,6 +21,8 @@ class HardwareExecutorTests(unittest.TestCase):
             cjson=ROOT/'managed_components/espressif__cjson/cJSON'
             binary=ROOT/'build/lamp_hardware_cli.exe'
             result=subprocess.run([compiler,'-std=c++23','-static','-pthread','-finput-charset=UTF-8',
+                                   '-DCONFIG_APPLE_LAMP_DELIVERY=1','-DCONFIG_SPIRAM_USE_MALLOC=1',
+                                   '-DCONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024',
                                    '-I',str(stubs),'-I',str(ROOT/'scripts/tests/fixtures'),'-I',str(ROOT/'main'),
                                    '-I',str(board),'-I',str(cjson),
                                    str(ROOT/'scripts/tests/lamp_hardware_cli.cc'),

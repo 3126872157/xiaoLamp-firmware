@@ -874,6 +874,11 @@ void LampHardwareExecutor::RecordDiagnostic(const std::string& kind, const std::
     cJSON_AddBoolToObject(event.get(), "truncated", length < data.size());
     cJSON_AddStringToObject(event.get(), "data", data.substr(0, length).c_str());
     auto json = lamp::Encode(event.get());
+#if CONFIG_APPLE_LAMP_DELIVERY && CONFIG_SPIRAM_USE_MALLOC
+    // Bounded conversation/vision history must not retain scores of small
+    // INTERNAL allocations after audio stops. Keep its backing strings in PSRAM.
+    json.reserve(std::max(json.size(), size_t(CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL) + 1));
+#endif
     diagnostic_bytes_ += json.size();
     diagnostics_.push_back({diagnostic_sequence_, std::move(json)});
     while (diagnostics_.size() > 128 || diagnostic_bytes_ > 65536) {
