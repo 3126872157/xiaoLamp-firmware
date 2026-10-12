@@ -611,6 +611,7 @@ std::string LampHardwareExecutor::State() {
     cJSON_AddStringToObject(o.get(), "mode", Modes[mode_]);
     cJSON_AddBoolToObject(o.get(), "busy", !active_.empty() || !queued_.empty());
     cJSON_AddBoolToObject(o.get(), "requires_operator_enable", !armed_);
+    cJSON_AddBoolToObject(o.get(), "explicit_motion_can_enable", !manual_ && !teaching_owned_);
     cJSON_AddBoolToObject(o.get(), "light_supported", false);
     auto* calibrations = cJSON_AddObjectToObject(o.get(), "calibrated_targets");
     for (int m = 0; m < 3; m++) {
@@ -1028,15 +1029,27 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
         Finish(id, "failed", "No physical light driver; no simulated success");
         return;
     }
+    bool enable_for_request = false;
     {
         std::lock_guard lock(mutex_);
         if (!armed_) {
-            records_.at(id).status = "failed";
-            records_.at(id).reason =
-                "运动未授权：使能未完成，或故障/卸力/保存映射/"
-                "退出手动控制已关闭授权；请检查后重新使能";
-            active_.clear();
-            RecordDiagnostic("task", id, Receipt(id, records_.at(id)));
+            // A direct semantic motion request grants enable for this task. Background
+            // expressions, tracking, teaching and manual control never gain it implicitly.
+            enable_for_request = !manual_ && !teaching_owned_ && !Item(args, "context") &&
+                                 (op == "execute" || op == "execute_group" || op == "rest");
+            if (!enable_for_request) {
+                records_.at(id).status = "failed";
+                records_.at(id).reason = "运动未授权：后台/示教/手动任务请先明确使能";
+                active_.clear();
+                RecordDiagnostic("task", id, Receipt(id, records_.at(id)));
+                return;
+            }
+        }
+    }
+    if (enable_for_request) {
+        RecordDiagnostic("auto_enable", id, "Explicit semantic motion: hold measured pose first");
+        if (!Torque(true, token)) {
+            failure(io_error_.empty() ? "自动使能失败，动作未执行" : io_error_);
             return;
         }
     }
