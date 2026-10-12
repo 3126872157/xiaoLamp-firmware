@@ -4,11 +4,16 @@
 #include <esp_log.h>
 #include <esp_netif.h>
 #include <esp_random.h>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include "lamp_delivery.h"
+#include "lamp_protocol.h"
 #include "lamp_twin_page.h"
 #include "lamp_twin_web.h"
+#include "mcp_server.h"
 #if CONFIG_APPLE_LAMP_DELIVERY
 #include "lamp_delivery_page.h"
 #endif
@@ -30,6 +35,68 @@ esp_err_t Json(httpd_req_t* req, const std::string& data) {
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, data.data(), data.size());
+}
+
+// Bridge McpServer (JSON-RPC 2.0) into a synchronous HTTP call. The HTTP handler
+// runs on the httpd task while tool callbacks are dispatched to the application
+// task, so blocking here does not deadlock the main loop.
+std::string CallMcp(const std::string& message, uint32_t timeout_ms) {
+    struct Capture {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::string payload;
+        bool done = false;
+    };
+    auto* capture = new Capture();
+    McpServer::GetInstance().ParseMessage(
+        message, [capture](const std::string& payload) {
+            {
+                std::lock_guard lock(capture->mutex);
+                capture->payload = payload;
+                capture->done = true;
+            }
+            capture->cv.notify_all();
+        });
+    std::unique_lock lock(capture->mutex);
+    if (!capture->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                              [&] { return capture->done; })) {
+        delete capture;
+        return "{\"ok\":false,\"error\":{\"message\":\"MCP call timed out\"}}";
+    }
+    auto payload = std::move(capture->payload);
+    delete capture;
+    return payload;
+}
+
+esp_err_t McpTools(httpd_req_t* req) {
+    const auto response = CallMcp(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}", 5000);
+    CJsonUniquePtr parsed(cJSON_Parse(response.c_str()));
+    auto* result = parsed ? cJSON_GetObjectItem(parsed.get(), "result") : nullptr;
+    if (result)
+        return Json(req, lamp::Encode(result));
+    return Json(req, response);
+}
+
+esp_err_t McpCall(httpd_req_t* req, const std::string& body) {
+    CJsonUniquePtr o(cJSON_ParseWithLengthOpts(body.c_str(), body.size() + 1, nullptr, true));
+    auto* name = o ? cJSON_GetObjectItem(o.get(), "name") : nullptr;
+    auto* arguments = o ? cJSON_GetObjectItem(o.get(), "arguments") : nullptr;
+    if (!cJSON_IsString(name) || (arguments && !cJSON_IsObject(arguments))) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return Json(req, "{\"ok\":false,\"error\":{\"message\":\"Expected {name, arguments}\"}}");
+    }
+    CJsonUniquePtr rpc(cJSON_CreateObject());
+    cJSON_AddStringToObject(rpc.get(), "jsonrpc", "2.0");
+    cJSON_AddNumberToObject(rpc.get(), "id", 1);
+    cJSON_AddStringToObject(rpc.get(), "method", "tools/call");
+    auto* params = cJSON_AddObjectToObject(rpc.get(), "params");
+    cJSON_AddStringToObject(params, "name", name->valuestring);
+    if (arguments)
+        cJSON_AddItemToObject(params, "arguments", cJSON_Duplicate(arguments, true));
+    else
+        cJSON_AddItemToObject(params, "arguments", cJSON_CreateObject());
+    return Json(req, CallMcp(lamp::Encode(rpc.get()), 10000));
 }
 esp_err_t Page(httpd_req_t* req) {
     std::string page = kLampTwinPage;
@@ -93,6 +160,8 @@ esp_err_t Api(httpd_req_t* req) {
             return Json(req, device->State());
         if (path == "/api/lamp/config")
             return Json(req, device->PanelConfig());
+        if (path == "/api/mcp/tools")
+            return McpTools(req);
         const std::string prefix = "/api/lamp/tasks/";
         if (path.starts_with(prefix)) {
             auto id = path.substr(prefix.size());
@@ -104,7 +173,8 @@ esp_err_t Api(httpd_req_t* req) {
         }
     } else if (req->method == HTTP_POST) {
         if (req->content_len <= 0 ||
-            req->content_len > (path == "/api/lamp/delivery" ? 16384 : 2048) ||
+            req->content_len >
+                (path == "/api/lamp/delivery" || path == "/api/mcp/call" ? 16384 : 2048) ||
             !Header(req, "Content-Type").starts_with("application/json")) {
             httpd_resp_set_status(req, "400 Bad Request");
             return Json(req,
@@ -122,6 +192,8 @@ esp_err_t Api(httpd_req_t* req) {
         if (path == "/api/lamp/delivery")
             return Json(req, LampDeliverySubmit(body, true));
 #endif
+        if (path == "/api/mcp/call")
+            return McpCall(req, body);
         if (path == "/api/lamp/calibration/preview")
             return Json(req, device->PanelConfig(body));
         if (path == "/api/lamp/command")
@@ -163,9 +235,17 @@ void StartLampTwinWeb(LampHardwareExecutor& executor) {
     get.handler = Api;
     httpd_uri_t post = get;
     post.method = HTTP_POST;
+    httpd_uri_t mcp_get{};
+    mcp_get.uri = "/api/mcp/*";
+    mcp_get.method = HTTP_GET;
+    mcp_get.handler = Api;
+    httpd_uri_t mcp_post = mcp_get;
+    mcp_post.method = HTTP_POST;
     if (httpd_register_uri_handler(server, &root) != ESP_OK ||
         httpd_register_uri_handler(server, &get) != ESP_OK ||
-        httpd_register_uri_handler(server, &post) != ESP_OK) {
+        httpd_register_uri_handler(server, &post) != ESP_OK ||
+        httpd_register_uri_handler(server, &mcp_get) != ESP_OK ||
+        httpd_register_uri_handler(server, &mcp_post) != ESP_OK) {
         httpd_stop(server);
         server = nullptr;
         ESP_LOGE("LampTwin", "HTTP route registration failed");
