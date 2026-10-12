@@ -223,6 +223,28 @@ Application& Application::GetInstance() {
 }
 int main() {
     auto cfg = lamp::pose::ParseConfiguration(lamp::pose::kDeviceConfiguration);
+    assert(cfg);
+    auto reloaded = lamp::pose::ParseConfiguration(lamp::Encode(cfg->source.get()));
+    assert(reloaded);
+    for (int mode = 0; mode < 3; ++mode)
+        for (int j = 0; j < 5; ++j) {
+            assert(cfg->modes[mode].ranges[j].min == reloaded->modes[mode].ranges[j].min);
+            assert(cfg->modes[mode].ranges[j].max == reloaded->modes[mode].ranges[j].max);
+        }
+    // Looking up in work and down in stand is allowed by mode workspace.
+    auto wide = cfg->modes[2].home;
+    wide[3] = 0;
+    assert(lamp::pose::InMode(wide, cfg->modes[2]));
+    wide = cfg->modes[1].home;
+    wide[3] = -std::numbers::pi / 2;
+    assert(lamp::pose::InMode(wide, cfg->modes[1]));
+    // Folded body deviations no longer force Home at the old 15/25-degree boundary.
+    wide = cfg->modes[0].home;
+    wide[1] -= .5;
+    wide[2] += .5;
+    assert(lamp::pose::InMode(wide, cfg->modes[0]));
+    wide[2] = -2;
+    assert(!lamp::pose::InMode(wide, cfg->modes[0]));  // URDF remains mandatory
     auto yaw_step =
         Json(R"({"action_id":"adjust_pose","direction":"yaw_negative","size":"small"})");
     auto yaw_plan = lamp::pose::Build(*cfg, 0, cfg->modes[1].home, yaw_step.get());
@@ -237,13 +259,29 @@ int main() {
         std::lock_guard l(bus_mutex);
         assert(writes[1] == 0 && writes[31] == 0);
     }
-    Submit(*e, "disarmed", "execute", R"({"action_id":"execute_primitive","skill_id":"A01"})");
+    Submit(
+        *e, "disarmed", "execute",
+        R"({"action_id":"execute_primitive","skill_id":"A01","context":{"source":"dialogue","turn_id":"boot-expression","cue":"agreement"}})");
     assert(Wait(*e, "disarmed") == "failed");
+    {
+        std::lock_guard l(bus_mutex);
+        assert(writes[31] == 0);
+    }
+    Submit(*e, "auto-stand", "execute", R"({"action_id":"set_mode","mode":"stand"})");
+    assert(Wait(*e, "auto-stand") == "completed");
+    assert(cJSON_IsTrue(Item(Json(e->State()).get(), "motion_enabled")));
+    Submit(*e, "auto-sit", "execute", R"({"action_id":"set_mode","mode":"sit"})");
+    assert(Wait(*e, "auto-sit") == "completed");
+    std::array<int, 5> held;
+    {
+        std::lock_guard l(bus_mutex);
+        std::copy(std::begin(position), std::end(position), held.begin());
+    }
     Submit(*e, "enable", "set_torque", R"({"enabled":true})");
     assert(Wait(*e, "enable") == "completed");
     {
         std::lock_guard l(bus_mutex);
-        assert(position[1] == 834 && position[3] == 625);
+        assert(std::equal(held.begin(), held.end(), std::begin(position)));
     }
     Submit(*e, "nod", "execute", R"({"action_id":"execute_primitive","skill_id":"A01"})");
     assert(Wait(*e, "nod") == "completed");

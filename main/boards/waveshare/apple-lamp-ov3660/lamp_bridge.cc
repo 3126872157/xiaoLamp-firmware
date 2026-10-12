@@ -602,8 +602,11 @@ void RegisterLampTools(LampActionExecutor& executor) {
         "not only explicit motion orders; at most one automatic expression per turn. "
         "'Nod once' and 'nod twice' each mean ONE A01 invocation with local default two nods; "
         "never submit two A01 steps for 'nod twice'. Explicit 3-5 nods use options.repetitions. "
-        "After torque release, enable_torque only on wake or explicit finish-adjusting, before "
-        "motion. Wait for enable_torque task status completed; accepted is NOT enabled. "
+        "A direct user motion request (stand/sit/move) must call run_sequence even if disarmed: "
+        "the hardware executor enables and confirms torque at the measured pose first. Do not "
+        "just reply that enable is required. Automatic dialogue expressions must include context "
+        "and cannot auto-enable; teaching/manual ownership blocks motion. For separate "
+        "enable_torque, wait for completed; accepted is NOT enabled. "
         "Do not re-enable after each successful action. Unknown A12 is disabled; standing is "
         "set_mode stand. "
         "Returns bridge_request_id; queued/answered is NOT motion completion. Poll get_state.",
