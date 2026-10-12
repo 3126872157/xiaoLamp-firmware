@@ -4,6 +4,7 @@
 #include <memory>
 #include "lamp_catalog.h"
 #include "lamp_protocol.h"
+#include "lamp_tool_table.h"
 
 namespace {
 using Json = std::unique_ptr<cJSON, decltype(&cJSON_Delete)>;
@@ -46,21 +47,7 @@ bool Emergency(const std::string& name, const std::string& args) {
             cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(j.get(), "enabled")));
 }
 std::string Operation(const std::string& name) {
-    if (name == "lamp_run_sequence" || name == "lamp_set_mode" || name == "lamp_prepare_expression")
-        return "execute_group";
-    if (name == "lamp_stop")
-        return "cancel";
-    if (name == "lamp_get_task")
-        return "get_task";
-    if (name == "lamp_set_torque")
-        return "set_torque";
-    if (name == "lamp_record_calibration")
-        return "record_calibration";
-    if (name == "lamp_rest")
-        return "rest";
-    if (name == "lamp_get_state")
-        return "get_state";
-    return "";
+    return lamp::ToolTableOperation(name);
 }
 }  // namespace
 
@@ -122,6 +109,18 @@ void LampEdgeRuntime::Process(Work* work) {
         cJSON_GetObjectItemCaseSensitive(args.get(), "context")) {
         Complete(work, Error("Unknown tool/invalid args; runtime owns context"));
         return;
+    }
+    // Added tools carry a fixed argument template. The table validator already refused a
+    // template that fixes a schema property or fails the semantic validator, and the stored
+    // template wins over any argument the model sends.
+    if (const auto fixed = lamp::ToolTableArgsTemplate(work->name); !fixed.empty()) {
+        auto stored = Parse(fixed);
+        auto merged = Json(cJSON_Duplicate(args.get(), true), cJSON_Delete);
+        for (auto* field = stored->child; field; field = field->next) {
+            cJSON_DeleteItemFromObjectCaseSensitive(merged.get(), field->string);
+            cJSON_AddItemToObject(merged.get(), field->string, cJSON_Duplicate(field, true));
+        }
+        args = std::move(merged);
     }
     const bool prepare_expression = work->name == "lamp_prepare_expression";
     bool silent_expression = false;
@@ -436,121 +435,12 @@ std::string LampEdgeRuntime::State() {
     cJSON_AddNumberToObject(runtime, "queued_bytes", queued_bytes_);
     return lamp::Encode(j.get());
 }
-
 std::string LampEdgeRuntime::Tools() {
-    auto catalog = Parse(lamp::kCatalog);
-    Json tools(cJSON_CreateArray(), cJSON_Delete);
-    auto add = [&](const char* name, const char* description, cJSON* schema) {
-        auto* tool = cJSON_CreateObject();
-        cJSON_AddStringToObject(tool, "type", "function");
-        auto* function = cJSON_AddObjectToObject(tool, "function");
-        cJSON_AddStringToObject(function, "name", name);
-        cJSON_AddStringToObject(function, "description", description);
-        cJSON_AddItemToObject(function, "parameters", schema);
-        cJSON_AddItemToArray(tools.get(), tool);
-    };
-    auto object = [] {
-        auto* s = cJSON_CreateObject();
-        cJSON_AddStringToObject(s, "type", "object");
-        cJSON_AddBoolToObject(s, "additionalProperties", false);
-        cJSON_AddObjectToObject(s, "properties");
-        return s;
-    };
-    add("lamp_get_state",
-        "查询机械臂缓存：available才表示五轴反馈新鲜；mode仅保存的动作参考，不能断言已经站起。",
-        object());
-    add("lamp_end_conversation",
-        "广义告别或停止聊天：简短告别播完退出监听，不坐下卸力。讨论告别不结束。", object());
-    add("lamp_rest",
-        "用户说你去休息吧/休息一下/"
-        "睡吧时必须调用这个完整动作，不能仅回答：必要时使能，坐下并确认，卸力，成功后告别并停止监听"
-        "。用户说自己休息或讨论休息不调用。",
-        object());
-    add("lamp_set_mode",
-        "明确命令站起来/站好/坐下/"
-        "开始工作时调用，不能仅口头答应。必要时自动使能，再切换姿态并等待真实完成。保持yaw；不用于"
-        "无动作意图的聊天或后台表达。",
-        cJSON_Parse(
-            R"({"type":"object","additionalProperties":false,"properties":{"mode":{"type":"string","enum":["sit","stand","work"]}},"required":["mode"]})"));
-    add("lamp_stop", "停止运动但保持支撑力矩，不自动补播。", object());
-    add("lamp_get_task", "只有需要实际完成结果时查询任务，避免反复调用。",
-        cJSON_Parse(
-            R"({"type":"object","additionalProperties":false,"properties":{"task_id":{"type":"string"}},"required":["task_id"]})"));
-    add("lamp_set_torque",
-        "仅用户明确要求使能或卸力时调用，true保持实际当前位置上力；false原地卸力。不用于普通对话表"
-        "达。",
-        cJSON_Parse(
-            R"({"type":"object","additionalProperties":false,"properties":{"enabled":{"type":"boolean"}},"required":["enabled"]})"));
-    add("lamp_record_calibration", "用户已手摆对准并明确说记录时保存当前模式的完整回读姿态。",
-        cJSON_Parse(
-            R"({"type":"object","additionalProperties":false,"properties":{"target_id":{"type":"string","enum":["user","book"]}},"required":["target_id"]})"));
-    add("lamp_express",
-        "纯动作传speak:false与action或skill_"
-        "id，立即执行且成功不说话；默认伴随说话的表达：先调用预备，再自然回答；实际播放开始后本地释"
-        "放动作。不等待运动完成，不用于"
-        "单独站起/坐下/工作。开心/"
-        "兴奋A02，好奇B02，同意A01，否定B01，低落A03，强调A16。无需目标或标定，必须已使能，不自动上"
-        "力。每轮最多一次。",
-        cJSON_Parse(
-            R"({"type":"object","additionalProperties":false,"properties":{"skill_id":{"type":"string","enum":["A01","A02","A03","B01","B02","A16"]},"action":{"type":"string","enum":["点头","兴奋摆动","低头","摇头","好奇歪头","强调","nod","sway","lower_head","shake_head","tilt","emphasize"]},"speak":{"type":"boolean","description":"false只做动作不回复；true或省略伴随说话"},"repetitions":{"type":"integer","minimum":1,"maximum":5,"description":"仅A01点头；一次或两下保持默认2，明确三/四/五次才设置。不拆成多次调用。"},"end_mode":{"type":"string","enum":["return_to_reference","hold_at_end"]}},"oneOf":[{"required":["skill_id"]},{"required":["action"]}]})"));
-    auto schema = Json(object(), cJSON_Delete);
-    auto* steps = cJSON_CreateObject();
-    cJSON_AddStringToObject(steps, "type", "array");
-    cJSON_AddNumberToObject(steps, "minItems", 1);
-    cJSON_AddNumberToObject(steps, "maxItems", 16);
-    auto* items = cJSON_AddObjectToObject(steps, "items");
-    auto* choices = cJSON_AddArrayToObject(items, "oneOf");
-    for (const char* collection : {"actions", "primitives"}) {
-        auto* rows = cJSON_GetObjectItemCaseSensitive(catalog.get(), collection);
-        for (auto* row = rows ? rows->child : nullptr; row; row = row->next) {
-            const bool primitive = std::string(collection) == "primitives";
-            const auto id = lamp::Text(row, primitive ? "id" : "action_id");
-            if (id == "A10")
-                continue;  // Hardware has no supported lighting output.
-            auto* step = object();
-            auto* properties = cJSON_GetObjectItem(step, "properties");
-            auto* action = cJSON_AddObjectToObject(properties, "action_id");
-            cJSON_AddStringToObject(action, "const", primitive ? "execute_primitive" : id.c_str());
-            auto* required = cJSON_AddArrayToObject(step, "required");
-            cJSON_AddItemToArray(required, cJSON_CreateString("action_id"));
-            if (primitive) {
-                auto* skill = cJSON_AddObjectToObject(properties, "skill_id");
-                cJSON_AddStringToObject(skill, "const", id.c_str());
-                cJSON_AddItemToArray(required, cJSON_CreateString("skill_id"));
-                cJSON_AddItemToObject(
-                    properties, "options",
-                    cJSON_Duplicate(cJSON_GetObjectItem(row, "inputSchema"), true));
-                if (id != "A01" && id != "A02" && id != "A03" && id != "A16" && id != "B01" &&
-                    id != "B02")
-                    cJSON_AddItemToObject(
-                        properties, "target_id",
-                        cJSON_Parse(R"({"type":"string","enum":["user","book"]})"));
-                if (cJSON_IsTrue(cJSON_GetObjectItem(row, "target_required")))
-                    cJSON_AddItemToArray(required, cJSON_CreateString("target_id"));
-            } else {
-                auto* fields = cJSON_GetObjectItem(row, "fields");
-                for (auto* f = fields ? fields->child : nullptr; f; f = f->next) {
-                    cJSON_AddItemToObject(properties, f->string, cJSON_Duplicate(f, true));
-                    if (std::string(f->string) != "size")
-                        cJSON_AddItemToArray(required, cJSON_CreateString(f->string));
-                }
-            }
-            cJSON_AddStringToObject(
-                step, "description",
-                primitive ? lamp::Text(row, "description").c_str() : id.c_str());
-            cJSON_AddItemToArray(choices, step);
-        }
-    }
-    cJSON_AddItemToObject(cJSON_GetObjectItem(schema.get(), "properties"), "steps", steps);
-    cJSON_AddItemToObject(
-        cJSON_GetObjectItem(schema.get(), "properties"), "enable_if_needed",
-        cJSON_Parse(
-            R"({"type":"boolean","description":"仅用户明确要求实际运动时true；自发表达/后台动作必须false，默认false。"})"));
-    cJSON_AddItemToObject(schema.get(), "required", cJSON_Parse("[\"steps\"]"));
-    add("lamp_run_sequence",
-        "执行一个有限语义动作组。次数幅度用本地默认，点两下头只用一次A01。靠近用A13而非低头，缺标定"
-        "不替代。set_mode保持yaw。受理后可正常回答，不声称已完成。若要边说边表达请用lamp_"
-        "express，不在这里串行等待表达。",
-        schema.release());
-    return lamp::Encode(tools.get());
+    return lamp::ToolTableTools();
+}
+std::string LampEdgeRuntime::Instructions() {
+    return lamp::ToolTableInstructions();
+}
+std::function<std::string(const std::string&)> LampEdgeRuntime::ToolOperations() {
+    return [](const std::string& name) { return lamp::ToolTableOperation(name); };
 }

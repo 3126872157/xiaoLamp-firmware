@@ -9,6 +9,7 @@
 #include "application.h"
 #include "board.h"
 #include "omni_contract.h"
+#include "omni_lamp_tools.h"
 #include "settings.h"
 
 namespace {
@@ -19,7 +20,8 @@ std::function<std::string()> state_reader;
 std::function<std::future<std::string>(const std::string&, const std::string&, uint64_t)>
     runtime_dispatch;
 std::function<void(uint64_t)> runtime_cancel;
-std::string runtime_tools;
+std::string runtime_tools, runtime_instructions;
+std::function<std::string(const std::string&)> runtime_operations;
 std::function<std::shared_ptr<const OmniImage>()> image_reader;
 bool image_enabled = false;
 std::function<void(bool, unsigned)> vision_periodic;
@@ -42,6 +44,10 @@ std::atomic<uint64_t> turn_sequence{0};
 std::atomic<bool> in_use{false};
 std::atomic<uint32_t> playback_sequence{0};
 std::atomic<uint32_t> receive_waits{0};
+// Audio-uplink instrumentation. Counters only: the queue capacities stay fixed.
+std::atomic<unsigned> audio_high_water{0}, audio_dropped_frames{0}, audio_overruns{0},
+    audio_recoveries{0}, audio_appends{0}, audio_coalesced_frames{0}, audio_drop_streak{0};
+std::atomic<int64_t> slowest_write_us{0};
 bool configuration_loaded = false;
 void LoadConfiguration() {
     if (configuration_loaded)
@@ -124,14 +130,60 @@ void OmniSetStateReader(std::function<std::string()> reader) {
 void OmniSetRuntime(
     std::function<std::future<std::string>(const std::string&, const std::string&, uint64_t)>
         dispatch,
-    std::function<void(uint64_t)> cancel, const std::string& tools) {
+    std::function<void(uint64_t)> cancel, const std::string& tools,
+    const std::string& instructions,
+    std::function<std::string(const std::string&)> operations) {
     std::lock_guard lock(config_mutex);
     runtime_dispatch = std::move(dispatch);
     runtime_cancel = std::move(cancel);
     runtime_tools = tools;
+    runtime_instructions = instructions;
+    runtime_operations = std::move(operations);
     if (runtime_dispatch)
         transcription_enabled = true;
 }
+
+void OmniSetRuntimeTools(const std::string& tools, const std::string& instructions) {
+    std::lock_guard lock(config_mutex);
+    if (!runtime_dispatch)
+        return;
+    runtime_tools = tools;
+    runtime_instructions = instructions;
+}
+
+namespace {
+// Added tools resolve through the active table; the compiled vocabulary is the fallback
+// for callers that install a runtime without one.
+std::string ToolOperation(const std::function<std::string(const std::string&)>& operations,
+                          const std::string& name) {
+    if (operations) {
+        if (auto operation = operations(name); !operation.empty())
+            return operation;
+    }
+    return lamp::ToolOperation(name);
+}
+bool StopTool(const std::function<std::string(const std::string&)>& operations,
+              const std::string& name, const std::string& args) {
+    const auto operation = ToolOperation(operations, name);
+    if (operation == "cancel")
+        return true;
+    if (operation != "set_torque")
+        return false;
+    auto parsed = cJSON_ParseWithOpts(args.c_str(), nullptr, true);
+    const bool unload = cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(parsed, "enabled"));
+    cJSON_Delete(parsed);
+    return unload;
+}
+bool MotionTool(const std::function<std::string(const std::string&)>& operations,
+                const std::string& name) {
+    return lamp::MotionOperation(ToolOperation(operations, name));
+}
+bool SuppressedByStop(const std::function<std::string(const std::string&)>& operations,
+                      const std::string& name) {
+    return !lamp::ExpressionTool(name) &&
+           lamp::ControlOperation(ToolOperation(operations, name));
+}
+}  // namespace
 
 std::string OmniPanel(const std::string& request) {
     auto body = Parse(request);
@@ -243,6 +295,14 @@ std::string OmniPanel(const std::string& request) {
                             runtime_tools.empty() ? "poc" : "semantic_tools");
     cJSON_AddBoolToObject(j.get(), "credentials_persistent", true);
     cJSON_AddNumberToObject(j.get(), "receive_backpressure_waits", receive_waits);
+    cJSON_AddNumberToObject(j.get(), "audio_queue_high_water", audio_high_water);
+    cJSON_AddNumberToObject(j.get(), "audio_queue_capacity", 8);
+    cJSON_AddNumberToObject(j.get(), "audio_dropped_frames", audio_dropped_frames);
+    cJSON_AddNumberToObject(j.get(), "audio_overruns", audio_overruns);
+    cJSON_AddNumberToObject(j.get(), "audio_recoveries", audio_recoveries);
+    cJSON_AddNumberToObject(j.get(), "audio_appends", audio_appends);
+    cJSON_AddNumberToObject(j.get(), "audio_coalesced_frames", audio_coalesced_frames);
+    cJSON_AddNumberToObject(j.get(), "audio_worst_write_ms", double(slowest_write_us) / 1000);
     cJSON_AddBoolToObject(j.get(), "manual_image_supported", bool(image_reader));
     cJSON_AddBoolToObject(j.get(), "manual_image_enabled", image_enabled);
     cJSON_AddStringToObject(j.get(), "image_error", image_error.c_str());
@@ -306,10 +366,42 @@ bool OmniRealtimeProtocol::Start() {
 }
 bool OmniRealtimeProtocol::Enqueue(Work* w) {
     if (w->audio) {
-        if (running_ && audio_queue_ && xQueueSend(audio_queue_, &w, 0) == pdTRUE)
-            return true;
-        delete w;
+        // Microphone audio is realtime: when the bounded queue is full, drop the oldest
+        // frame and keep the turn instead of rejecting the whole utterance. Only a
+        // sustained streak of drops falls back to the bounded quiet-recovery path.
+        constexpr unsigned kSustainedDropStreak = 4;
+        bool accepted = false, dropped = false, sustained = false;
+        if (running_ && audio_queue_) {
+            if (xQueueSend(audio_queue_, &w, 0) == pdTRUE) {
+                accepted = true;
+            } else {
+                Work* oldest = nullptr;
+                if (xQueueReceive(audio_queue_, &oldest, 0) == pdTRUE) {
+                    delete oldest;
+                    dropped = true;
+                    if (xQueueSend(audio_queue_, &w, 0) == pdTRUE)
+                        accepted = true;
+                }
+            }
+        }
+        if (accepted) {
+            const auto depth = uxQueueMessagesWaiting(audio_queue_);
+            auto high = audio_high_water.load();
+            while (depth > high && !audio_high_water.compare_exchange_weak(high, depth)) {
+            }
+            if (dropped) {
+                ++audio_dropped_frames;
+                sustained = ++audio_drop_streak >= kSustainedDropStreak;
+            } else {
+                audio_drop_streak = 0;
+            }
+            if (!sustained)
+                return true;
+        } else {
+            delete w;
+        }
         audio_overrun_ = true;
+        ++audio_overruns;
         return false;
     }
     if (w->incoming && queue_) {
@@ -411,10 +503,13 @@ void OmniRealtimeProtocol::SendAbortSpeaking(AbortReason reason) {
     cancel_ = true;
 }
 bool OmniRealtimeProtocol::AppendPcm(const std::string& pcm) {
-    // 30 ms mono PCM16 = 960 bytes: each JSON append fits a single <= 2048-byte
-    // WebSocket frame, including during UART planning. No sample loss or resending.
-    for (size_t offset = 0; offset < pcm.size(); offset += 960) {
-        const auto bytes = std::min(size_t(960), pcm.size() - offset);
+    // One append per captured frame. A 60 ms mono PCM16 frame is 1920 bytes and becomes a
+    // ~2.6 KB JSON message, which Write() carries in a few <= 2048-byte continuation
+    // fragments of *one* message. Only oversized input (e.g. a coalesced backlog) is split,
+    // to keep each message bounded without dropping samples.
+    constexpr size_t kMaxAppendBytes = 960 * 4;
+    for (size_t offset = 0; offset < pcm.size(); offset += kMaxAppendBytes) {
+        const auto bytes = std::min(kMaxAppendBytes, pcm.size() - offset);
         size_t length = 0;
         std::string encoded(4 * ((bytes + 2) / 3) + 1, '\0');
         if (mbedtls_base64_encode(
@@ -426,16 +521,92 @@ bool OmniRealtimeProtocol::AppendPcm(const std::string& pcm) {
         encoded.resize(length);
         if (!Write("{\"type\":\"input_audio_buffer.append\",\"audio\":\"" + encoded + "\"}"))
             return false;
+        ++audio_appends;
     }
     return true;
 }
+OmniRealtimeProtocol::Work* OmniRealtimeProtocol::TakeQueuedAudio() {
+    // Microphone audio is taken first each iteration, and when the worker is behind, frames
+    // that are already queued are merged into one append. Never waits for new audio and adds
+    // no buffering beyond the frames already in the fixed-capacity queue.
+    Work* raw = nullptr;
+    if (!audio_queue_ || xQueueReceive(audio_queue_, &raw, 0) != pdTRUE)
+        return nullptr;
+    constexpr unsigned kMaxCoalescedFrames = 3;
+    unsigned frames = 1;
+    while (frames < kMaxCoalescedFrames && uxQueueMessagesWaiting(audio_queue_) > 0) {
+        Work* next = nullptr;
+        if (xQueueReceive(audio_queue_, &next, 0) != pdTRUE)
+            break;
+        if (next->epoch != epoch_ || !next->audio) {
+            delete next;
+            break;
+        }
+        raw->text += next->text;
+        ++frames;
+        ++audio_coalesced_frames;
+        delete next;
+    }
+    return raw;
+}
+void OmniRealtimeProtocol::DrainQueuedAudioBeforeLongWrite() {
+    // Only in the exact state where the run loop would also append microphone PCM, and never
+    // re-entered from a nested Write, so message order and turn bookkeeping stay intact.
+    // This waits for nothing: it only sends frames that are already queued.
+    if (draining_write_ || !audio_queue_ || !recording_ || audio_recovering_ ||
+        silent_phase_ != SilentPhase::Idle || observation_phase_ != ObservationPhase::Idle)
+        return;
+    draining_write_ = true;
+    constexpr unsigned kMaxDrainedFrames = 4;
+    for (unsigned frames = 0; frames < kMaxDrainedFrames && uxQueueMessagesWaiting(audio_queue_) > 0;
+         ++frames) {
+        Work* raw = nullptr;
+        if (xQueueReceive(audio_queue_, &raw, 0) != pdTRUE)
+            break;
+        std::unique_ptr<Work> frame(raw);
+        if (frame->epoch != epoch_ || !frame->audio || frame->text.empty())
+            continue;
+        if (BackgroundQuiet(frame->text)) {
+            if (!quiet_since_)
+                quiet_since_ = esp_timer_get_time();
+        } else {
+            quiet_since_ = esp_timer_get_time();
+        }
+        if (AppendPcm(frame->text))
+            had_audio_ = true;
+    }
+    draining_write_ = false;
+}
+namespace {
+// Longest single outbound write, so the panel can show the worst-case worker stall.
+// Counters only: nothing here buffers or resequences audio.
+struct WriteWatch {
+    std::atomic<int64_t>* worst;
+    int64_t started_at;
+    explicit WriteWatch(std::atomic<int64_t>& value)
+        : worst(&value), started_at(esp_timer_get_time()) {}
+    ~WriteWatch() {
+        const auto elapsed = esp_timer_get_time() - started_at;
+        auto current = worst->load();
+        while (elapsed > current && !worst->compare_exchange_weak(current, elapsed)) {
+        }
+    }
+};
+}  // namespace
+
 bool OmniRealtimeProtocol::Write(const std::string& s) {
+    const WriteWatch watch{slowest_write_us};
     if (close_ || disconnected_)
         return false;
     // One JSON message, bounded WebSocket continuation frames. The vendor transport clones
     // each masked frame; keeping it below the 4 KiB TLS record avoids another large copy.
     // Never resend a failed fragment: the underlying TCP write may already be partial.
     constexpr size_t kFragmentBytes = 2048;
+    // A multi-fragment message cannot be interleaved with any other message (continuation
+    // frames must stay contiguous), so push out the microphone frames that are already
+    // queued before monopolising the worker for its whole length.
+    if (s.size() > kFragmentBytes)
+        DrainQueuedAudioBeforeLongWrite();
     size_t offset = 0;
     if (socket_ && socket_->IsConnected()) {
         do {
@@ -481,9 +652,14 @@ std::string OmniRealtimeProtocol::Session(bool manual, bool include_audio) {
         if (!runtime_tools.empty()) {
             auto* session = cJSON_GetObjectItem(j.get(), "session");
             cJSON_ReplaceItemInObject(session, "tools", cJSON_Parse(runtime_tools.c_str()));
-            cJSON_ReplaceItemInObject(
-                session, "instructions",
-                cJSON_CreateString(
+            // A stored tool table may replace the compiled instructions.
+            if (!runtime_instructions.empty()) {
+                cJSON_ReplaceItemInObject(session, "instructions",
+                                          cJSON_CreateString(runtime_instructions.c_str()));
+            } else {
+                cJSON_ReplaceItemInObject(
+                    session, "instructions",
+                    cJSON_CreateString(
                     "你是热情自然的桌面台灯，用简短中文对话。通过提供的有限语义工具"
                     "控制台灯，机械参数使用本地默认。"
                     "机械臂在线只由lamp_get_state的available=true判断，runtime_ready仅软件在运行。"
@@ -526,6 +702,7 @@ std::string OmniRealtimeProtocol::Session(bool manual, bool include_audio) {
                     "mp_express，先预备再自然说话，不用lamp_run_"
                     "sequence串行表达，不提前播报要做动作。prepared仅预备，本地随实际播放释放，失败"
                     "要说真实原因；成功表达不用再说好或报告完成。普通事实问答可只说话。"));
+            }
         }
     }
     cJSON_AddItemToObject(cJSON_GetObjectItem(j.get(), "session"), "input_audio_transcription",
@@ -877,8 +1054,12 @@ void OmniRealtimeProtocol::Receive(const std::string& text) {
             tool.output =
                 R"({"ok":false,"error":"Session tool cache full; start a new conversation"})";
         }
-        if (name == "lamp_express" || name == "lamp_run_sequence" || name == "lamp_set_mode" ||
-            name == "lamp_rest")
+        std::function<std::string(const std::string&)> operations;
+        {
+            std::lock_guard lock(config_mutex);
+            operations = runtime_operations;
+        }
+        if (MotionTool(operations, name))
             response_motion_tool_ = true;
         auto call_info = Parse("{}");
         cJSON_AddStringToObject(call_info.get(), "call_id", call.c_str());
@@ -943,29 +1124,27 @@ void OmniRealtimeProtocol::CompleteTools() {
     std::function<std::future<std::string>(const std::string&, const std::string&, uint64_t)>
         dispatch;
     std::function<std::string()> reader;
+    std::function<std::string(const std::string&)> operations;
     {
         std::lock_guard lock(config_mutex);
         dispatch = runtime_dispatch;
         reader = state_reader;
+        operations = runtime_operations;
     }
     // Dispatch emergency controls before motion, independent of their network arrival order.
-    std::stable_sort(tools_.begin(), tools_.end(), [](const Tool& a, const Tool& b) {
-        auto urgent = [](const Tool& t) {
-            auto args = Parse(t.arguments);
-            return t.name == "lamp_stop" ||
-                   (t.name == "lamp_set_torque" &&
-                    cJSON_IsFalse(cJSON_GetObjectItem(args.get(), "enabled")));
+    std::stable_sort(tools_.begin(), tools_.end(), [&operations](const Tool& a, const Tool& b) {
+        auto urgent = [&operations](const Tool& t) {
+            return StopTool(operations, t.name, t.arguments);
         };
         return urgent(a) > urgent(b);
     });
-    const bool stop_batch = std::any_of(tools_.begin(), tools_.end(), [](const Tool& t) {
-        auto args = Parse(t.arguments);
-        return t.name == "lamp_stop" || (t.name == "lamp_set_torque" &&
-                                         cJSON_IsFalse(cJSON_GetObjectItem(args.get(), "enabled")));
+    const bool stop_batch = std::any_of(tools_.begin(), tools_.end(), [&operations](const Tool& t) {
+        return StopTool(operations, t.name, t.arguments);
     });
-    const bool explicit_motion = std::any_of(tools_.begin(), tools_.end(), [](const Tool& t) {
-        return t.name == "lamp_run_sequence" || t.name == "lamp_set_mode" || t.name == "lamp_rest";
-    });
+    const bool explicit_motion =
+        std::any_of(tools_.begin(), tools_.end(), [&operations](const Tool& t) {
+            return MotionTool(operations, t.name) && !lamp::ExpressionTool(t.name);
+        });
     bool waiting = false;
     for (auto& tool : tools_) {
         if (tool.output.empty() && !tool.result.valid()) {
@@ -976,12 +1155,9 @@ void OmniRealtimeProtocol::CompleteTools() {
                 recording_ = false;
                 tool.output =
                     R"({"ok":true,"status":"rest_pending","instruction":"Say one short goodbye; close after playback. No servo or torque change."})";
-            } else if (stop_batch &&
-                       (tool.name == "lamp_run_sequence" || tool.name == "lamp_set_mode" ||
-                        tool.name == "lamp_rest" || tool.name == "lamp_record_calibration" ||
-                        tool.name == "lamp_set_torque")) {
+            } else if (stop_batch && SuppressedByStop(operations, tool.name)) {
                 auto args = Parse(tool.arguments);
-                if (tool.name == "lamp_set_torque" &&
+                if (ToolOperation(operations, tool.name) == "set_torque" &&
                     cJSON_IsFalse(cJSON_GetObjectItem(args.get(), "enabled")) && dispatch)
                     tool.result = dispatch(tool.name, tool.arguments, turn_);
                 else
@@ -1137,6 +1313,18 @@ std::string OmniRuntimeState() {
     }
     auto state = Parse(reader ? reader() : "{}");
     AddObservationState(state.get());
+    // Audio-uplink health: shows whether the bounded input queue is actually saturating.
+    auto* audio = cJSON_AddObjectToObject(state.get(), "audio_uplink");
+    if (audio) {
+        cJSON_AddNumberToObject(audio, "queue_capacity", 8);
+        cJSON_AddNumberToObject(audio, "queue_high_water", audio_high_water.load());
+        cJSON_AddNumberToObject(audio, "dropped_frames", audio_dropped_frames.load());
+        cJSON_AddNumberToObject(audio, "overruns", audio_overruns.load());
+        cJSON_AddNumberToObject(audio, "recoveries", audio_recoveries.load());
+        cJSON_AddNumberToObject(audio, "appends", audio_appends.load());
+        cJSON_AddNumberToObject(audio, "coalesced_frames", audio_coalesced_frames.load());
+        cJSON_AddNumberToObject(audio, "worst_write_ms", double(slowest_write_us.load()) / 1000);
+    }
     return Dump(state.get());
 }
 bool OmniRealtimeProtocol::AppendImage() {
@@ -1982,17 +2170,26 @@ void OmniRealtimeProtocol::RecoverAudioInput() {
     }
     sample_sent_ = false;
     had_audio_ = false;
+    ++audio_recoveries;
     Board::GetInstance().RecordDiagnostic(
         "audio_input_overrun", "utterance_rejected",
-        "Input buffer full; discard incomplete input until 600ms quiet; connection preserved");
+        "Input buffer full (high_water=" + std::to_string(audio_high_water.load()) +
+            "/8, dropped=" + std::to_string(audio_dropped_frames.load()) +
+            ", worst_write_ms=" + std::to_string(slowest_write_us.load() / 1000) +
+            "); discard incomplete input until 600ms quiet; connection preserved");
 }
 void OmniRealtimeProtocol::Run() {
     while (running_) {
         RecoverAudioInput();
-        PollExpression();
-        PollObservation();
-        if (awaiting_tools_ && ready_ && !close_ && !cancel_)
-            CompleteTools();
+        // Realtime PCM has strict priority: while the fixed input queue holds a backlog,
+        // defer the optional (but deadline-checked) work below to the next iteration.
+        const bool audio_backlog = audio_queue_ && uxQueueMessagesWaiting(audio_queue_) > 0;
+        if (!audio_backlog) {
+            PollExpression();
+            PollObservation();
+            if (awaiting_tools_ && ready_ && !close_ && !cancel_)
+                CompleteTools();
+        }
         const bool peer_closed = disconnected_.exchange(false);
         if (peer_closed && !close_ && !rest_requested_ && conversation_wanted_) {
             ScheduleReconnect();
@@ -2032,15 +2229,17 @@ void OmniRealtimeProtocol::Run() {
             Status("cancelled", "", reason);
             Board::GetInstance().RecordDiagnostic("voice_cancel", "omni", reason);
         }
-        Work* raw = nullptr;
-        if (xQueueReceive(queue_, &raw, 0) != pdTRUE) {
+        Work* raw = TakeQueuedAudio();
+        if (!raw) {
             const auto listen = listen_requested_.exchange(0);
             if (listen)
                 raw = new Work{listen == 1 ? "@manual" : "@vad", false, false, epoch_};
             else if (finish_requested_.exchange(false))
                 raw = new Work{"@finish", false, false, epoch_};
-            else if (xQueueReceive(audio_queue_, &raw, pdMS_TO_TICKS(20)) != pdTRUE)
-                continue;
+            else if (xQueueReceive(queue_, &raw, 0) != pdTRUE) {
+                if (xQueueReceive(audio_queue_, &raw, pdMS_TO_TICKS(20)) != pdTRUE)
+                    continue;
+            }
         }
         std::unique_ptr<Work> w(raw);
         if (w->epoch != epoch_)

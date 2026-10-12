@@ -98,7 +98,8 @@ public:
         OmniSetRuntime([runtime](const auto& name, const auto& args,
                                  uint64_t turn) { return runtime->Submit(name, args, turn); },
                        [runtime](uint64_t turn) { runtime->Cancel(turn); },
-                       LampEdgeRuntime::Tools());
+                       LampEdgeRuntime::Tools(), LampEdgeRuntime::Instructions(),
+                       LampEdgeRuntime::ToolOperations());
         auto* vision = new LampVision(camera_, *hardware);
         OmniSetVision(
             [vision] { return vision->Latest(); },

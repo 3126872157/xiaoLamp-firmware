@@ -20,6 +20,9 @@ public:
     void Cancel(uint64_t turn);
     std::string State();
     static std::string Tools();
+    // Runtime instructions and the operation lookup for the active tool table.
+    static std::string Instructions();
+    static std::function<std::string(const std::string&)> ToolOperations();
     // Single bounded iteration, also used by production-path host tests.
     void Tick();
 

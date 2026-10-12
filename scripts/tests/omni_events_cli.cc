@@ -72,9 +72,17 @@ int main() {
     for (unsigned i = 0; i < 8; ++i)
         assert(p.Enqueue(
             new OmniRealtimeProtocol::Work{std::string(1920, '\0'), false, true, p.epoch_}));
-    assert(
-        !p.Enqueue(new OmniRealtimeProtocol::Work{std::string(1920, '\0'), false, true, p.epoch_}));
-    assert(p.audio_overrun_ && !p.overloaded_);
+    assert(audio_high_water == 8);
+    // Realtime audio drops the oldest queued frame instead of rejecting the utterance.
+    for (unsigned i = 0; i < 3; ++i)
+        assert(p.Enqueue(
+            new OmniRealtimeProtocol::Work{std::string(1920, '\0'), false, true, p.epoch_}));
+    assert(!p.audio_overrun_ && audio_dropped_frames == 3 && !p.overloaded_);
+    assert(p.audio_queue_->items.size() == 8);
+    // Only a sustained streak escalates to the bounded quiet-recovery path.
+    assert(!p.Enqueue(
+        new OmniRealtimeProtocol::Work{std::string(1920, '\0'), false, true, p.epoch_}));
+    assert(p.audio_overrun_ && audio_dropped_frames == 4 && !p.overloaded_);
     p.SendStartListening(kListeningModeManualStop);
     assert(p.listen_requested_ == 1 && p.queue_->items.empty());
     p.socket_ = std::make_unique<WebSocket>();
@@ -82,6 +90,7 @@ int main() {
     p.RecoverAudioInput();
     assert(p.audio_recovering_ && !p.close_ && p.ready_ && p.audio_queue_->items.empty());
     assert(p.socket_->sent.back().find("input_audio_buffer.clear") != std::string::npos);
+    assert(audio_recoveries == 1);
     p.ready_ = false;
     p.audio_recovering_ = false;
     p.socket_ = std::make_unique<WebSocket>();
@@ -89,20 +98,42 @@ int main() {
     for (size_t i = 0; i < raw_pcm.size(); ++i)
         raw_pcm[i] = char(i % 256);
     assert(p.AppendPcm(raw_pcm));
-    assert(p.socket_->sent.size() == 2 && p.socket_->frames == 2 && p.socket_->pending.empty());
+    // One append per captured 60 ms frame: a single message carried by bounded fragments.
+    assert(p.socket_->sent.size() == 1 && p.socket_->frames == 2 && p.socket_->pending.empty());
+    assert(audio_appends == 1);
     std::string restored_pcm;
     for (const auto& message : p.socket_->sent) {
         auto json = Parse(message);
         auto encoded = Str(json.get(), "audio");
-        unsigned char decoded[1024];
+        unsigned char decoded[2048];
         size_t size = 0;
-        assert(message.size() < 2048 &&
+        assert(message.size() <= 4096 &&
                mbedtls_base64_decode(decoded, sizeof(decoded), &size,
                                      reinterpret_cast<const unsigned char*>(encoded.data()),
                                      encoded.size()) == 0);
         restored_pcm.append(reinterpret_cast<char*>(decoded), size);
     }
     assert(restored_pcm == raw_pcm);
+    // When behind, already-queued frames are merged instead of sent one message each.
+    for (unsigned i = 0; i < 3; ++i)
+        assert(p.Enqueue(
+            new OmniRealtimeProtocol::Work{std::string(1920, char('a' + i)), false, true, p.epoch_}));
+    std::unique_ptr<OmniRealtimeProtocol::Work> merged(p.TakeQueuedAudio());
+    assert(merged && merged->text.size() == 1920 * 3 && audio_coalesced_frames == 2);
+    assert(p.TakeQueuedAudio() == nullptr);
+    // A multi-fragment message first pushes out frames that are already queued: continuation
+    // frames can never be interleaved, so the audio must complete before it.
+    p.socket_ = std::make_unique<WebSocket>();
+    p.ready_ = true;
+    p.recording_ = true;
+    assert(p.Enqueue(
+        new OmniRealtimeProtocol::Work{std::string(960, '\0'), false, true, p.epoch_}));
+    assert(p.Write(std::string(3000, 'x')));
+    assert(p.socket_->sent.size() == 2 &&
+           p.socket_->sent[0].find("input_audio_buffer.append") != std::string::npos &&
+           p.socket_->sent[1] == std::string(3000, 'x'));
+    p.recording_ = false;
+    p.ready_ = false;
     p.socket_ = std::make_unique<WebSocket>();
     unsigned opened = 0, audio = 0, starts = 0, stops = 0, errors = 0, reads = 0;
     p.OnAudioChannelOpened([&] { opened++; });

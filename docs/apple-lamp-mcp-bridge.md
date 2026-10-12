@@ -203,3 +203,66 @@ restore_initial；set_mode、restore_home、rest、A04由网页保持当前Yaw�
 C++协议12项、Web125项通过，板型编译通过，app 0x2702e0（38%空余）；开发时COM8未连接，
 暂未烧录本轮新工具。根项目 docs/posture_heading_and_approach.md 记录了标准姿态来源与
 网页对话/MCP时间线调试面板的后续TODO（本次不实现）。
+
+
+## 运行时工具表：不重编固件也能改接口
+
+`edge-runtime` 角色之前增删技能必须改 C++ 再重编：工具名、描述、schema 全部写死在
+`lamp_edge_runtime.cc::Tools()`，且 `Operation()` 直接拒绝未知名字。现在改为
+**编译期能力 + 运行期接口**：NVS 里可以存一张受校验的工具表，只改“模型看到什么”，
+不改“固件能做什么”。
+
+### 存储与生效
+
+- 位置：NVS 命名空间 `lamp_tools`、键 `table_v1`，格式 `lamp-tools/1`（字符串，非 blob）。
+- 生效：面板保存成功后立即用于下一次 `session.update`（`OmniSetRuntimeTools`），
+  重启后从 NVS 重新读取；无效表回落编译期默认，并把原因放进 `/api/lamp/tools` 的 `error`。
+- 面板接口（沿用面板的 `X-Lamp-Token` + 同源 + 有界 JSON，本路由上限 4096 字节）：
+  `GET /api/lamp/tools` 读取当前表与生效工具；`POST` 传
+  `{"op":"validate"|"save"|"clear", "table":{...}}`，`validate` 只校验不落盘。
+
+页面的 `api()` 帮助函数已经带 token，直接在浏览器控制台（打开 `http://<设备IP>:8080/` 后）即可：
+
+```js
+await api('tools');                                       // 读取：custom/error/advertised/table
+await api('tools', {op:'validate', table:{/*…*/}});        // 只校验
+await api('tools', {op:'save', table:{/*…*/}});            // 校验并写入 NVS，立即生效
+await api('tools', {op:'clear'});                          // 回到编译期默认
+```
+
+```json
+{"op":"save","table":{
+  "protocol_version":"lamp-tools/1",
+  "instructions":"（可选，覆盖人格提示词）",
+  "tools":[
+    {"name":"lamp_rest","description":"改写过的描述","schema":{"type":"object","properties":{}}},
+    {"name":"lamp_nod_twice","description":"点两下头","operation":"execute_group",
+     "args":{"steps":[{"action_id":"execute_primitive","skill_id":"A01","options":{"repetitions":2}}]},
+     "schema":{"type":"object","additionalProperties":false,"properties":{}}}
+  ]}}
+```
+
+### 边界（不重编能做什么、不能做什么）
+
+- **可以**：改写任何已公开工具的描述/schema；覆盖 `instructions`；新增工具
+  （≤8 个），但 `operation` 只能是编译期固定集合：
+  `execute_group`、`cancel`、`get_task`、`set_torque`、`record_calibration`、`rest`、`get_state`。
+- **不可以**：新增 operation；改动内置工具的 operation；删除工具（内置项缺省即保留，
+  `lamp_stop` 与 `lamp_set_torque` 永远在列表里）；改引脚、限位、轨迹、标定语义。
+- **新增工具的 `args` 模板**必须通过生产语义校验器 `lamp::Command()`（保存时干跑一次），
+  且模板字段与 schema 属性不得重叠；执行时**模板优先**，模型无法改写被模板固定的参数
+  （例如“点两下头”不能变成摇头）。因此新技能只会走既有的语义动作，不会绕过
+  `lamp_pose_plan` 的轨迹、执行器的反馈新鲜度/标定/使能门禁。
+- **协议层同步按 operation 分类**：`lamp_stop`/卸力抑制、每轮一个动作组、表达冷却等
+  安全判断改成按 operation 判定（`main/protocols/omni_lamp_tools.h`），所以数据表新增的
+  动作工具同样会被同一条“同响应内停止优先”规则抑制。
+- **仍然存在的风险**：工具描述直接进入模型提示词，能拿到面板 token 的局域网用户即可改写
+  人设/诱导调用（行为风险）。token 每次开机重新随机且面板走明文 HTTP，同网段可嗅探。
+  物理安全边界不受影响。
+- 上限：整表 ≤3000 B、instructions ≤1500 B、描述 ≤320 B、schema ≤1200 B、表内条目 ≤16。
+
+实现：`lamp_tool_table.h/.cc`（校验+NVS+生效工具）、`omni_lamp_tools.h`（编译期名字→operation）、
+`lamp_edge_runtime.cc` 的模板合并、`omni_realtime_protocol.cc` 的 operation 化安全判断。
+宿主测试见 `scripts/tests/lamp_tool_table_cli.cc` 与 `scripts/tests/lamp_edge_runtime_cli.cc`
+（新增工具、模板不可改写、无效表回落、重启保持）。
+

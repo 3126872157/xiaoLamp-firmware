@@ -8,6 +8,10 @@
 #include <string>
 #include "lamp_twin_page.h"
 #include "lamp_twin_web.h"
+#if CONFIG_APPLE_LAMP_EDGE_RUNTIME
+#include "lamp_protocol.h"
+#include "lamp_tool_table.h"
+#endif
 #if CONFIG_APPLE_LAMP_OMNI_REALTIME
 #include "lamp_omni_page.h"
 #if CONFIG_APPLE_LAMP_EDGE_RUNTIME
@@ -37,6 +41,59 @@ esp_err_t Json(httpd_req_t* req, const std::string& data) {
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, data.data(), data.size());
 }
+#if CONFIG_APPLE_LAMP_EDGE_RUNTIME
+std::string ToolsState() {
+    const auto status = lamp::ToolTableStatus();
+    auto* root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddBoolToObject(root, "custom", status.custom);
+    cJSON_AddBoolToObject(root, "custom_instructions", status.custom_instructions);
+    cJSON_AddNumberToObject(root, "tools", status.tools);
+    cJSON_AddNumberToObject(root, "added", status.added);
+    cJSON_AddStringToObject(root, "error", status.error.c_str());
+    cJSON_AddStringToObject(root, "table", lamp::ToolTableJson().c_str());
+    cJSON_AddItemToObject(root, "advertised", cJSON_Parse(lamp::ToolTableTools().c_str()));
+    CJsonStringUniquePtr text(cJSON_PrintUnformatted(root));
+    cJSON_Delete(root);
+    return text ? std::string(text.get()) : std::string("{}");
+}
+std::string ToolsApply(const std::string& body) {
+    auto reply = [](bool ok, const std::string& error) {
+        auto* root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "ok", ok);
+        if (!error.empty())
+            cJSON_AddStringToObject(root, "error", error.c_str());
+        CJsonStringUniquePtr text(cJSON_PrintUnformatted(root));
+        cJSON_Delete(root);
+        return text ? std::string(text.get()) : std::string("{}");
+    };
+    CJsonUniquePtr request(cJSON_ParseWithOpts(body.c_str(), nullptr, true));
+    if (!cJSON_IsObject(request.get()))
+        return reply(false, "Expected a JSON object");
+    const auto op = lamp::Text(request.get(), "op");
+    if (op == "clear") {
+        std::string ignored;
+        lamp::ToolTableSave("", ignored);
+        OmniSetRuntimeTools(lamp::ToolTableTools(), lamp::ToolTableInstructions());
+        return reply(true, "");
+    }
+    if (op != "save" && op != "validate")
+        return reply(false, "Expected op save, validate or clear");
+    auto* table = cJSON_GetObjectItemCaseSensitive(request.get(), "table");
+    if (!table)
+        return reply(false, "Missing table");
+    const auto text = lamp::Encode(table);
+    std::string error;
+    if (!lamp::ToolTableValidate(text, error))
+        return reply(false, error);
+    if (op == "validate")
+        return reply(true, "");
+    if (!lamp::ToolTableSave(text, error))
+        return reply(false, error);
+    OmniSetRuntimeTools(lamp::ToolTableTools(), lamp::ToolTableInstructions());
+    return reply(true, "");
+}
+#endif
 esp_err_t Page(httpd_req_t* req) {
     std::string page = kLampTwinPage;
     page.replace(page.find("__TOKEN__"), 9, secret);
@@ -85,6 +142,8 @@ esp_err_t Api(httpd_req_t* req) {
         }
         if (path == "/api/lamp/runtime")
             return Json(req, OmniRuntimeState());
+        if (path == "/api/lamp/tools")
+            return Json(req, ToolsState());
 #endif
 #endif
         if (path == "/api/lamp/history") {
@@ -113,7 +172,9 @@ esp_err_t Api(httpd_req_t* req) {
             return Json(req, device->Inspect(id));
         }
     } else if (req->method == HTTP_POST) {
-        if (req->content_len <= 0 || req->content_len > 2048 ||
+        // The tool table is the largest accepted body; every other route stays at 2048.
+        const size_t limit = path == "/api/lamp/tools" ? 4096 : 2048;
+        if (req->content_len <= 0 || req->content_len > limit ||
             !Header(req, "Content-Type").starts_with("application/json")) {
             httpd_resp_set_status(req, "400 Bad Request");
             return Json(req,
@@ -128,6 +189,8 @@ esp_err_t Api(httpd_req_t* req) {
             received += n;
         }
 #if CONFIG_APPLE_LAMP_EDGE_RUNTIME
+        if (path == "/api/lamp/tools")
+            return Json(req, ToolsApply(body));
         if (path == "/api/lamp/vision") {
             CJsonUniquePtr parsed(cJSON_ParseWithOpts(body.c_str(), nullptr, true));
             if (!cJSON_IsObject(parsed.get()) || cJSON_GetArraySize(parsed.get()) != 1 ||

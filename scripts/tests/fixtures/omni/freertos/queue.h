@@ -1,6 +1,10 @@
 #pragma once
 #include "FreeRTOS.h"
 inline QueueHandle_t xQueueCreate(unsigned n, unsigned) { return new FakeQueue{{}, n}; }
+inline unsigned uxQueueMessagesWaiting(QueueHandle_t q) {
+    std::lock_guard lock(q->mutex);
+    return static_cast<unsigned>(q->items.size());
+}
 inline int xQueueSend(QueueHandle_t q, void* p, unsigned wait) {
     {
         std::lock_guard lock(q->mutex);

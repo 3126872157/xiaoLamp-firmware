@@ -47,6 +47,22 @@ python scripts/build_lamp_variant.py --role local-twin --archive-only --flash --
 | `GET /api/lamp/tasks/<request_id 或 task_id>` | 受理、运行、完成、失败、取消；受理不等于动作完成 |
 | `POST /api/lamp/calibration/preview` | `{ "mapping": [{ "direction": 1, "zero_ticks": 500 }, ...五项] }`，验证并返回候选可达范围；不运动、不保存 |
 | `POST /api/lamp/command` | 有界操作对象，提交执行器工作任务；HTTP 回调不读写 UART |
+| `GET /api/lamp/tools` | 运行期工具表状态与生效工具（见 [板级 MCP 联调说明](./apple-lamp-mcp-bridge.md)） |
+
+`GET /api/lamp/runtime` 在 `audio_uplink` 对象里给出上行健康度，只读、不改变任何策略：
+
+| 字段 | 含义 |
+| --- | --- |
+| `queue_capacity` | 固定容量 8 帧（60 ms/帧，合计 480 ms），不随负载变化 |
+| `queue_high_water` | 本次启动以来音频输入队列达到过的最大深度 |
+| `dropped_frames` | 队列满时丢弃的最旧帧总数（保住了当轮语音） |
+| `overruns` / `recoveries` | 持续丢帧升级为"拒绝本轮 + 600 ms 静音恢复"的次数 |
+| `appends` | 实际发出的 `input_audio_buffer.append` 条数 |
+| `coalesced_frames` | 落后时合并发送的帧数（省下的消息数） |
+| `worst_write_ms` | 单次发送（含分片）最坏耗时，用于判断 worker 是否被长消息阻塞 |
+
+同一组计数也出现在 `/api/lamp/omni` 面板状态里（`audio_*` 前缀），以及 `audio_input_overrun` 诊断正文中。
+策略与取舍见 [音频上行与输入溢出](./apple-lamp-audio-uplink.md)。
 
 `pose_rad`/`target_pose_rad` 按 `baseYaw, shoulder, elbow, wrist, headRoll` 命名，缺少新鲜反馈的关节不返回数值。
 不要将界面显示角度再当成 URDF 角度。`mapping[].display_sign` 仅用于界面，`direction` 是真实舵机相对 URDF 的方向。

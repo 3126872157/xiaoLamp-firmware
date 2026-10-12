@@ -29,7 +29,11 @@ std::string OmniRuntimeState();
 void OmniSetRuntime(
     std::function<std::future<std::string>(const std::string&, const std::string&, uint64_t)>
         dispatch,
-    std::function<void(uint64_t)> cancel, const std::string& tools);
+    std::function<void(uint64_t)> cancel, const std::string& tools,
+    const std::string& instructions = {},
+    std::function<std::string(const std::string&)> operations = {});
+// Advertises an updated tool table to the next session without reconnecting.
+void OmniSetRuntimeTools(const std::string& tools, const std::string& instructions);
 
 class OmniRealtimeProtocol final : public Protocol {
 public:
@@ -165,6 +169,11 @@ private:
     bool Enqueue(Work* work);
     bool Write(const std::string& text);
     bool AppendPcm(const std::string& pcm);
+    // Best-effort: before a multi-fragment message, send frames that are already queued.
+    void DrainQueuedAudioBeforeLongWrite();
+    // Audio-first dequeue with bounded coalescing of already-queued frames.
+    Work* TakeQueuedAudio();
+    bool draining_write_ = false;
     void Run();
     void Connect();
     void Disconnect(bool notify = true);

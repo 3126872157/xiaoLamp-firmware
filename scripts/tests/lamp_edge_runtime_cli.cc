@@ -2,10 +2,12 @@
 #include <iostream>
 #include "lamp_edge_runtime.h"
 #include "lamp_protocol.h"
+#include "lamp_tool_table.h"
 
 struct Executor : LampActionExecutor {
     unsigned counter = 0, groups = 0, stops = 0;
     bool armed = false, manual = false, completed = false, failed = false, online = false;
+    std::string last, last_group;
     std::string NewRequestId() override { return "test-" + std::to_string(++counter); }
     bool Ready() override { return true; }
     std::string State() override {
@@ -17,6 +19,7 @@ struct Executor : LampActionExecutor {
     }
     std::string Inspect(const std::string&) override { return "{}"; }
     std::string Submit(const std::string& text) override {
+        last = text;
         auto checked = lamp::Command(text);
         assert(checked);
         CJsonUniquePtr j(cJSON_Parse(text.c_str()));
@@ -35,6 +38,7 @@ struct Executor : LampActionExecutor {
             if (!armed || manual)
                 return "{\"ok\":false,\"error\":\"operator enable/control required\"}";
             groups++;
+            last_group = text;
         }
         return "{\"ok\":true,\"result\":{\"task_id\":\"hardware-" + id +
                "\",\"status\":\"accepted\"}}";
@@ -191,6 +195,44 @@ int main() {
     auto schemas = CJsonUniquePtr(cJSON_Parse(LampEdgeRuntime::Tools().c_str()));
     assert(cJSON_IsArray(schemas.get()) && cJSON_GetArraySize(schemas.get()) == 10);
     assert(LampEdgeRuntime::Tools().find("A10") == std::string::npos);
+    // A stored table adds tools that reuse a compiled operation through a fixed template.
+    const auto baseline = LampEdgeRuntime::Tools();
+    std::string error;
+    const std::string table =
+        R"({"protocol_version":"lamp-tools/1","instructions":"stored","tools":[{"name":"lamp_nod_twice","description":"点两下头","operation":"execute_group","args":{"steps":[{"action_id":"execute_primitive","skill_id":"A01","options":{"repetitions":2}}]},"schema":{"type":"object","additionalProperties":false,"properties":{}}}]})";
+    assert(lamp::ToolTableSave(table, error));
+    assert(LampEdgeRuntime::Tools().find("lamp_nod_twice") != std::string::npos);
+    assert(LampEdgeRuntime::Tools() != baseline);
+    assert(LampEdgeRuntime::Instructions() == "stored");
+    assert(LampEdgeRuntime::ToolOperations()("lamp_nod_twice") == "execute_group");
+    assert(LampEdgeRuntime::ToolOperations()("lamp_stop") == "cancel");
+    assert(LampEdgeRuntime::ToolOperations()("lamp_unknown").empty());
+    const auto groups_before = executor.groups;
+    executor.completed = true;
+    auto added = runtime.Submit("lamp_nod_twice", "{}", 15);
+    for (int i = 0; i < 4; i++)
+        runtime.Tick();
+    assert(added.get().find("\"ok\":true") != std::string::npos &&
+           executor.groups == groups_before + 1);
+    assert(executor.last_group.find("\"A01\"") != std::string::npos &&
+           executor.last_group.find("\"repetitions\":2") != std::string::npos);
+    // The stored template wins: a model cannot retarget a canned skill's arguments.
+    auto retargeted = runtime.Submit(
+        "lamp_nod_twice", R"({"steps":[{"action_id":"execute_primitive","skill_id":"B01"}]})", 16);
+    for (int i = 0; i < 4; i++)
+        runtime.Tick();
+    assert(retargeted.get().find("\"ok\":true") != std::string::npos &&
+           executor.groups == groups_before + 2);
+    assert(executor.last_group.find("\"B01\"") == std::string::npos &&
+           executor.last_group.find("\"A01\"") != std::string::npos);
+    auto unknown_tool = runtime.Submit("lamp_unknown", "{}", 17);
+    runtime.Tick();
+    assert(unknown_tool.get().find("Unknown tool") != std::string::npos);
+    auto context = runtime.Submit("lamp_nod_twice", R"({"context":{"source":"dialogue"}})", 18);
+    runtime.Tick();
+    assert(context.get().find("context") != std::string::npos);
+    assert(lamp::ToolTableSave("", error));
+    assert(LampEdgeRuntime::Tools() == baseline);
     std::cout << "PASS runtime: semantic bounds, ownership, disarmed rejection, one group, "
-                 "cancellation, feedback, emergency reserve and catalog\n";
+                 "cancellation, feedback, emergency reserve, catalog and stored tool table\n";
 }

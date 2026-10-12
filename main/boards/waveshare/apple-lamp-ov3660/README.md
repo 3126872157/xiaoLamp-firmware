@@ -28,6 +28,28 @@ UART、机械运动与本地动作存储仍未接入。语音调用完整闭环�
 `0d576d3d4c049c6f55eaf879725dc23e516511b4`（项目版本 2.5.1）。
 本地定制分支：`codex/apple-lamp-ov3660`。SDK：ESP-IDF 6.1。
 
+## 运行时工具表（改接口不用重编）
+
+`edge-runtime` 的工具清单编译期固定，但可以存一张受校验的表来改写接口，不必重编固件：
+
+- 位置：NVS 命名空间 `lamp_tools`、键 `table_v1`，格式 `lamp-tools/1`；
+  面板 `GET/POST /api/lamp/tools`（`{"op":"validate"|"save"|"clear","table":{…}}`）读写。
+- 可改：任何已公开工具的描述/schema、人格 `instructions`、**新增工具**（≤8 个）。
+- 新增工具只能复用编译期 operation（`execute_group`/`cancel`/`get_task`/`set_torque`/
+  `record_calibration`/`rest`/`get_state`），`args` 模板要过 `lamp::Command()` 语义校验；
+  执行时模板优先，模型不能改写被模板固定的参数。
+- 不可改：operation 集合、内置工具的 operation、引脚/限位/轨迹/标定语义；
+  内置工具只可覆盖不能删除（`lamp_stop`、`lamp_set_torque` 永远在列表中）。
+- 上限：整表 ≤3000 B、instructions ≤1500 B、描述 ≤320 B、schema ≤1200 B。
+- 字段与示例见 [板级 MCP 联调说明](../../../../docs/apple-lamp-mcp-bridge.md) 的「运行时工具表」。
+
+## 音频上行与溢出
+
+麦克风上行的队列容量固定（8 帧 × 60 ms），溢出时改为**丢最旧帧保住整轮**，只有连续丢帧才升级为
+"拒绝本轮 + 600 ms 静音恢复"；音频在循环里优先于入站事件，落后时合并已排队帧，长消息发送前先
+让路。计数见 `/api/lamp/runtime` 的 `audio_uplink`，策略与取舍与不做项见
+[docs/apple-lamp-audio-uplink.md](../../../../docs/apple-lamp-audio-uplink.md)。
+
 ## 本轮范围
 
 - 独立板型和 OTA 身份 `apple-lamp-ov3660`。
@@ -45,7 +67,6 @@ UART、机械运动与本地动作存储仍未接入。语音调用完整闭环�
 此阶段不修改动作存储分区。
 
 ## Windows 构建
-
 在项目根目录的 ESP-IDF 终端执行：
 
 ```powershell
