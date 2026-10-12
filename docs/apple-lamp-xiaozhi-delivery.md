@@ -4,6 +4,11 @@
 
 这是小智路线的独立交付候选，不包含Edge Runtime/Omni实现，不改0.1标签，不修改小智后端。新角色 `xiaozhi-delivery`，板型身份 `apple-lamp-ov3660-xiaozhi-delivery`。0.1的 `local-twin` 保留。
 
+同样的交付角色也已迁移到 OV2640 定制板，板型身份 `apple-lamp-ov2640-xiaozhi-delivery`
+（OV2640 专用 SCCB + 外接 I2S 功放 + 外接 PDM 麦，无 CH32V003/无 ES 编解码；交付逻辑与
+ov3660 完全一致）。两者通过 `scripts/build_lamp_variant.py --board <apple-lamp-ov3660|apple-lamp-ov2640>`
+区分，角色开关、分区表、工具集与验收流程相同。
+
 ## 当前实现与验证边界
 
 - 原8080测试网页及偏置/方向校准保留，新增示教、动作库、跟书、JPEG预览与资源诊断。
@@ -25,6 +30,8 @@
 
 ```powershell
 python scripts/build_lamp_variant.py --role xiaozhi-delivery
+# OV2640 定制板改用 --board apple-lamp-ov2640；默认 board 为 apple-lamp-ov3660。
+python scripts/build_lamp_variant.py --board apple-lamp-ov2640 --role xiaozhi-delivery
 python -m serial.tools.list_ports -v
 # 确认归档身份后再烧录；COM8仅示例。
 python scripts/build_lamp_variant.py --role xiaozhi-delivery --archive-only --flash --port COM8
