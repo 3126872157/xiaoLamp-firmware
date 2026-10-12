@@ -343,7 +343,8 @@ private:
         if (app.IsVoiceDetected() || app.GetDeviceState() == kDeviceStateSpeaking)
             return Error("Wait for audio to be idle before writing Flash");
         if (!ready_)
-            return Error(storage_error_);
+            return Error("Action partition is not initialized; use 'Initialize/Clear action "
+                         "partition' first");
         const auto data = lamp::delivery::EncodeAction(a);
         auto valid = lamp::delivery::ParseAction(data);
         if (!valid)

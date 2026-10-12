@@ -66,7 +66,7 @@ async function dRefresh(){if(dRefreshing)return;dRefreshing=true;try{
  if(!dTuningLoaded&&ds.tracking_options){for(const [k,v]of Object.entries(ds.tracking_options)){const el=$('d-opt-'+k);if(el)el.value=v}dTuningLoaded=true}
  $('d-tracking-status').textContent=(ds.tracking_enabled?'跟书开启':'跟书关闭')+' · '+ds.tracking_status+' · frame '+ds.frame_id+' · 观察年龄 '+ds.observation_age_ms+'ms · '+(ds.error||'');
  $('d-observation').textContent=JSON.stringify({observation:ds.observation,capture_pose_rad:ds.capture_pose_rad,raw:ds.vision_response_preview},null,2);$('d-raw').textContent=JSON.stringify(ds,null,2);
- $('d-capture').disabled=ds.teaching_status!=='recording';$('d-save').disabled=ds.teaching_status!=='recording'||(ds.frames?.length||0)<2;$('d-start-track').disabled=!ds.tracking_configured||ds.tracking_enabled;
+ $('d-capture').disabled=ds.teaching_status!=='recording';$('d-save').disabled=!ds.storage_ready||ds.teaching_status!=='recording'||(ds.frames?.length||0)<2;$('d-start-track').disabled=!ds.tracking_configured||ds.tracking_enabled;
  if(ds.frame_id&&ds.frame_id!==dPreviewId&&ds.tracking_status!=='observing'){
   const r=await fetch('/api/lamp/delivery/jpeg',{headers:{'X-Lamp-Token':token}});if(r.headers.get('Content-Type')?.startsWith('image/jpeg')){const url=URL.createObjectURL(await r.blob());if(dImageUrl)URL.revokeObjectURL(dImageUrl);dImageUrl=url;$('d-image').src=url;$('d-image').style.display='block';dPreviewId=ds.frame_id}
  }
