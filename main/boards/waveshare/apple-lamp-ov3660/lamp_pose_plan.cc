@@ -278,7 +278,7 @@ bool Safe(const Pose& q, const std::vector<Box>& boxes) {
     pts[count++] = (f.elbow + f.wrist) * .5;
     pts[count++] = f.wrist;
     for (auto p : pts) {
-        if (p.y < .004 || (p.y < .0433 - .002 && std::hypot(p.x, p.z) < kBaseRadius + .004))
+        if (p.y < .001 || (p.y < .0433 - .002 && std::hypot(p.x, p.z) < kBaseRadius + .001))
             return false;
         for (const auto& b : boxes) {
             const double dx = std::max({b.min.x - p.x, 0., p.x - b.max.x}),
@@ -292,7 +292,7 @@ bool Safe(const Pose& q, const std::vector<Box>& boxes) {
     const double len = ab.Dot(ab);
     for (int i = 0; i < 10; i++) {
         const double u = len < 1e-12 ? 0 : std::clamp((pts[i] - f.shoulder).Dot(ab) / len, 0., 1.);
-        if ((pts[i] - f.shoulder - ab * u).Length() < kShadeRadius * .55)
+        if ((pts[i] - f.shoulder - ab * u).Length() < .012)
             return false;
     }
     return true;
@@ -367,9 +367,24 @@ std::expected<Configuration, std::string> ParseConfiguration(const std::string& 
                 const auto* r =
                     Item(Item(raw, j == 0 || j == 3 ? "ranges" : "bodyRanges"), kNames[j]);
                 p.ranges[j] = {Number(r, "min"), Number(r, "max")};
-                if (p.ranges[j].min > 0 || p.ranges[j].max < 0 || p.ranges[j].min < -kPi ||
-                    p.ranges[j].max > kPi)
+                if (p.ranges[j].min > 0 || p.ranges[j].max < 0 || p.ranges[j].min < -2 * kPi ||
+                    p.ranges[j].max > 2 * kPi)
                     throw std::runtime_error("Invalid mode range");
+                // Mode envelopes are expressive workspace hints, not mechanical stops.
+                // Use an idempotent minimum workspace so persisted configs do not grow
+                // on every reload. URDF, installed ticks and geometry remain checked.
+                if (j == 0 || j == 3 || j == 4)
+                    p.ranges[j] = {kJoints[j].lower - p.home[j], kJoints[j].upper - p.home[j]};
+                else
+                    p.ranges[j] = {std::max(kJoints[j].lower - p.home[j],
+                                            std::min(p.ranges[j].min, -45 * kDeg)),
+                                   std::min(kJoints[j].upper - p.home[j],
+                                            std::max(p.ranges[j].max, 45 * kDeg))};
+                auto* stored = const_cast<cJSON*>(r);
+                cJSON_SetNumberValue(cJSON_GetObjectItemCaseSensitive(stored, "min"),
+                                     p.ranges[j].min);
+                cJSON_SetNumberValue(cJSON_GetObjectItemCaseSensitive(stored, "max"),
+                                     p.ranges[j].max);
             }
             const auto* targets = Item(raw, "targets");
             if (!cJSON_IsObject(targets))
