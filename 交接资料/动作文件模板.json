@@ -1,0 +1,29 @@
+{
+  "format": "lamp-relative-action/1",
+  "id": "wave_hello",
+  "name": "问候",
+  "description": "相对当前安全起点做小幅动作",
+  "model_version": "REPLACE_WITH_CURRENT_LAMP_POSE_MODEL",
+  "binding": "REPLACE_WITH_64_LOWERCASE_HEX_INSTALLATION_BINDING",
+  "angle_unit": "urdf_rad",
+  "joints": [
+    true,
+    false,
+    false,
+    true,
+    false
+  ],
+  "segments": [
+    {
+      "delta_rad": {
+        "baseYaw": 0.05,
+        "shoulder": 0.0,
+        "elbow": 0.0,
+        "wrist": 0.08,
+        "headRoll": 0.0
+      },
+      "duration_sec": 1.0
+    }
+  ],
+  "end_mode": "return_to_reference"
+}

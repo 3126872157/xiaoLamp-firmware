@@ -171,6 +171,7 @@ public:
                                                   "remove_frame",
                                                   "set_times",
                                                   "save",
+                                                  "save_frames",
                                                   "teach_end",
                                                   "import",
                                                   "delete",
@@ -343,7 +344,8 @@ private:
         if (app.IsVoiceDetected() || app.GetDeviceState() == kDeviceStateSpeaking)
             return Error("Wait for audio to be idle before writing Flash");
         if (!ready_)
-            return Error(storage_error_);
+            return Error("Action partition is not initialized; use 'Initialize/Clear action "
+                         "partition' first");
         const auto data = lamp::delivery::EncodeAction(a);
         auto valid = lamp::delivery::ParseAction(data);
         if (!valid)
@@ -470,6 +472,56 @@ private:
                 seg.seconds = frames_[i].seconds;
                 for (int j = 0; j < 5; ++j)
                     seg.delta[j] = a.joints[j] ? frames_[i].q[j] - frames_[i - 1].q[j] : 0;
+                a.segments.push_back(seg);
+            }
+            return SaveAction(a);
+        }
+        if (op == "save_frames") {
+            Pose q;
+            if (teaching_ != "recording" || !Fresh(state.get(), q, true) ||
+                draft_binding_ != hw_.InstallationBinding())
+                return Error(
+                    "Need confirmed unloaded fresh feedback and unchanged installation in teaching "
+                    "mode");
+            auto* frames = Get(args, "frames");
+            if (!cJSON_IsArray(frames) || cJSON_GetArraySize(frames) < 2 ||
+                cJSON_GetArraySize(frames) >= int(lamp::delivery::kMaxFrames))
+                return Error("Need 2-32 keyframes");
+            std::vector<Pose> keyframes;
+            keyframes.reserve(cJSON_GetArraySize(frames));
+            std::vector<double> times;
+            times.reserve(cJSON_GetArraySize(frames));
+            for (auto* p = frames->child; p; p = p->next) {
+                auto* duration = Get(p, "duration_sec");
+                if (!cJSON_IsNumber(duration) || !std::isfinite(duration->valuedouble) ||
+                    duration->valuedouble < .2 || duration->valuedouble > 10)
+                    return Error("Keyframe time must be 0.2-10 seconds");
+                auto pose = lamp::pose::ParsePose(Get(p, "pose_rad"));
+                if (!pose)
+                    return Error(pose.error());
+                keyframes.push_back(*pose);
+                times.push_back(duration->valuedouble);
+            }
+            Action a;
+            a.id = lamp::Text(args, "id");
+            a.name = lamp::Text(args, "name");
+            a.description = lamp::Text(args, "description");
+            a.binding = draft_binding_;
+            a.end_mode = lamp::Text(args, "end_mode");
+            auto* joints = Get(args, "joints");
+            if (!cJSON_IsArray(joints) || cJSON_GetArraySize(joints) != 5)
+                return Error("Select five joint booleans");
+            for (int j = 0; j < 5; ++j) {
+                auto* v = cJSON_GetArrayItem(joints, j);
+                if (!cJSON_IsBool(v))
+                    return Error("Joint selection must be boolean");
+                a.joints[j] = cJSON_IsTrue(v);
+            }
+            for (unsigned i = 1; i < keyframes.size(); ++i) {
+                lamp::delivery::Segment seg;
+                seg.seconds = times[i];
+                for (int j = 0; j < 5; ++j)
+                    seg.delta[j] = a.joints[j] ? keyframes[i][j] - keyframes[i - 1][j] : 0;
                 a.segments.push_back(seg);
             }
             return SaveAction(a);
