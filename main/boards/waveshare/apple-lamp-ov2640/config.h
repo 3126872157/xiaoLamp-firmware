@@ -19,6 +19,12 @@
 #define AUDIO_INPUT_SAMPLE_RATE 16000
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000
 
+// Lamp head LED dimmer. GPIO1 is the only free output left: the camera DVP bus
+// and SCCB take GPIO4-18, audio GPIO38-42, the servo UART GPIO43/44, USB
+// Serial/JTAG GPIO19/20 and the octal PSRAM GPIO33-37. GPIO1 is not an
+// ESP32-S3 strapping pin.
+#define LAMP_LIGHT_GPIO GPIO_NUM_1
+
 // OV2640 DVP camera wiring (dedicated SCCB, no IO expander).
 // Y2..Y9 (Arduino ESP32-CAM naming) map to DVP D0..D7 respectively.
 #define CAMERA_PIN_PWDN GPIO_NUM_NC

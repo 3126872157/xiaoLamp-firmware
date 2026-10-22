@@ -44,6 +44,65 @@ int nvs_commit(nvs_handle_t);
 constexpr int PSA_SUCCESS = 0, PSA_ALG_SHA_256 = 1;
 int psa_crypto_init();
 int psa_hash_compute(int, const unsigned char*, size_t, unsigned char*, size_t, size_t*);
+// LEDC is only reached by the boards that carry a PWM lamp dimmer; the harness
+// records the duty so the test can check the real mapping.
+enum gpio_num_t {
+    GPIO_NUM_NC = -1,
+    GPIO_NUM_0 = 0,
+    GPIO_NUM_1,
+    GPIO_NUM_2,
+    GPIO_NUM_3,
+    GPIO_NUM_4,
+    GPIO_NUM_5,
+    GPIO_NUM_6,
+    GPIO_NUM_7,
+    GPIO_NUM_8,
+    GPIO_NUM_9,
+    GPIO_NUM_10,
+    GPIO_NUM_11,
+    GPIO_NUM_12,
+    GPIO_NUM_13,
+    GPIO_NUM_14,
+    GPIO_NUM_15,
+    GPIO_NUM_16,
+    GPIO_NUM_17,
+    GPIO_NUM_18,
+    GPIO_NUM_19,
+    GPIO_NUM_20,
+    GPIO_NUM_21
+};
+constexpr int LEDC_LOW_SPEED_MODE = 0, LEDC_AUTO_CLK = 0, LEDC_TIMER_10_BIT = 10, LEDC_TIMER_0 = 0,
+              LEDC_TIMER_1 = 1, LEDC_CHANNEL_0 = 0, LEDC_CHANNEL_1 = 1;
+using ledc_mode_t = int;
+using ledc_timer_t = int;
+using ledc_channel_t = int;
+using ledc_timer_bit_t = int;
+using ledc_clk_cfg_t = int;
+struct ledc_timer_config_t {
+    ledc_mode_t speed_mode;
+    ledc_timer_bit_t duty_resolution;
+    ledc_timer_t timer_num;
+    uint32_t freq_hz;
+    ledc_clk_cfg_t clk_cfg;
+    bool deconfigure;
+};
+struct ledc_channel_config_t {
+    int gpio_num;
+    ledc_mode_t speed_mode;
+    ledc_channel_t channel;
+    ledc_timer_t timer_sel;
+    uint32_t duty;
+    int hpoint;
+    struct {
+        unsigned int output_invert : 1;
+    } flags;
+    bool deconfigure;
+};
+int ledc_timer_config(const ledc_timer_config_t*);
+int ledc_channel_config(const ledc_channel_config_t*);
+int ledc_set_duty(ledc_mode_t, ledc_channel_t, uint32_t);
+int ledc_update_duty(ledc_mode_t, ledc_channel_t);
+int ledc_stop(ledc_mode_t, ledc_channel_t, uint32_t);
 constexpr int kDeviceStateIdle = 0, kDeviceStateListening = 1;
 class Application {
 public:

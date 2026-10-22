@@ -58,16 +58,23 @@ using ReturnValue = std::variant<bool, int, std::string, cJSON*, ImageContent*>;
 using ToolResult = std::expected<ReturnValue, std::string>;
 using ToolCallback = std::function<ToolResult(const PropertyList&)>;
 
-enum PropertyType { kPropertyTypeBoolean, kPropertyTypeInteger, kPropertyTypeString };
+enum PropertyType {
+    kPropertyTypeBoolean,
+    kPropertyTypeInteger,
+    kPropertyTypeNumber,
+    kPropertyTypeString
+};
 
 class Property {
 private:
     std::string name_;
     PropertyType type_;
-    std::variant<bool, int, std::string> value_;
+    std::variant<bool, int, double, std::string> value_;
     bool has_default_value_;
-    std::optional<int> min_value_;  // 新增：整数最小值
-    std::optional<int> max_value_;  // 新增：整数最大值
+    std::optional<int> min_value_;      // 新增：整数最小值
+    std::optional<int> max_value_;      // 新增：整数最大值
+    std::optional<double> min_number_;  // 数字最小值（kPropertyTypeNumber）
+    std::optional<double> max_number_;  // 数字最大值（kPropertyTypeNumber）
     std::optional<size_t> max_length_;
 
 public:
@@ -109,6 +116,33 @@ public:
         value_ = default_value;
     }
 
+    Property(const std::string& name, PropertyType type, double min_value, double max_value)
+        : name_(name),
+          type_(type),
+          has_default_value_(false),
+          min_number_(min_value),
+          max_number_(max_value) {
+        if (type != kPropertyTypeNumber) {
+            esp_system_abort("MCP property number range is only valid for number properties");
+        }
+    }
+
+    Property(const std::string& name, PropertyType type, double default_value, double min_value,
+             double max_value)
+        : name_(name),
+          type_(type),
+          has_default_value_(true),
+          min_number_(min_value),
+          max_number_(max_value) {
+        if (type != kPropertyTypeNumber) {
+            esp_system_abort("MCP property number range is only valid for number properties");
+        }
+        if (default_value < min_value || default_value > max_value) {
+            esp_system_abort("MCP property default value is outside its declared range");
+        }
+        value_ = default_value;
+    }
+
     // Set max_length for string properties (builder pattern)
     Property& SetMaxLength(size_t max_length) {
         if (type_ != kPropertyTypeString) {
@@ -139,7 +173,7 @@ public:
 
     // Validate a value against this property's constraints without setting it.
     // Returns empty string on success, or an error message on failure.
-    std::string Validate(const std::variant<bool, int, std::string>& val) const {
+    std::string Validate(const std::variant<bool, int, double, std::string>& val) const {
         if (type_ == kPropertyTypeInteger && std::holds_alternative<int>(val)) {
             int v = std::get<int>(val);
             if (min_value_.has_value() && v < min_value_.value()) {
@@ -149,6 +183,16 @@ public:
             if (max_value_.has_value() && v > max_value_.value()) {
                 return "Property '" + name_ + "': value " + std::to_string(v) +
                        " exceeds maximum " + std::to_string(max_value_.value());
+            }
+        } else if (type_ == kPropertyTypeNumber && std::holds_alternative<double>(val)) {
+            double v = std::get<double>(val);
+            if (min_number_.has_value() && v < min_number_.value()) {
+                return "Property '" + name_ + "': value " + std::to_string(v) +
+                       " is below minimum " + std::to_string(min_number_.value());
+            }
+            if (max_number_.has_value() && v > max_number_.value()) {
+                return "Property '" + name_ + "': value " + std::to_string(v) +
+                       " exceeds maximum " + std::to_string(max_number_.value());
             }
         } else if (type_ == kPropertyTypeString && std::holds_alternative<std::string>(val)) {
             const auto& s = std::get<std::string>(val);
@@ -191,6 +235,17 @@ public:
             }
             if (max_value_.has_value()) {
                 cJSON_AddNumberToObject(json.get(), "maximum", max_value_.value());
+            }
+        } else if (type_ == kPropertyTypeNumber) {
+            cJSON_AddStringToObject(json.get(), "type", "number");
+            if (has_default_value_) {
+                cJSON_AddNumberToObject(json.get(), "default", value<double>());
+            }
+            if (min_number_.has_value()) {
+                cJSON_AddNumberToObject(json.get(), "minimum", min_number_.value());
+            }
+            if (max_number_.has_value()) {
+                cJSON_AddNumberToObject(json.get(), "maximum", max_number_.value());
             }
         } else if (type_ == kPropertyTypeString) {
             cJSON_AddStringToObject(json.get(), "type", "string");

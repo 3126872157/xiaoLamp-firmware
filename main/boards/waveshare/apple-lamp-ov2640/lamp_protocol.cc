@@ -248,6 +248,13 @@ std::expected<std::string, std::string> Command(const std::string& input) {
             return std::unexpected(result.error());
         if (!OneOf(Text(args, "target_id"), {"user", "book"}))
             return std::unexpected("Calibration target must be user/book");
+    } else if (operation == "set_light") {
+        if (auto result = Keys(args, {"brightness"}); !result)
+            return std::unexpected(result.error());
+        auto* brightness = cJSON_GetObjectItemCaseSensitive(args, "brightness");
+        if (!cJSON_IsNumber(brightness) || !std::isfinite(brightness->valuedouble) ||
+            brightness->valuedouble < 0 || brightness->valuedouble > 1)
+            return std::unexpected("brightness must be a number between 0 and 1");
     } else if (OneOf(operation, {"discover", "get_state", "end_lighting", "rest"})) {
         if (auto result = Keys(args, {}); !result)
             return std::unexpected(result.error());

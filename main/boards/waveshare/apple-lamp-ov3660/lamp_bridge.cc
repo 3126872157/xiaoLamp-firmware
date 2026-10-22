@@ -650,10 +650,18 @@ void RegisterLampTools(LampActionExecutor& executor) {
         });
     mcp.AddTool(
         "self.lamp.execute_action",
-        "Submit one lamp-action/2 execute envelope via action_json. "
-        "Only semantic args; permits A10 options.hold_mode=holding with a calibrated target. End "
-        "via end_lighting or stop. "
-        "Returns a receipt, not completion; query get_state.",
+        "Submit ONE lamp-action/2 execute command as a complete JSON envelope. The exact shape "
+        "is {protocol_version:'lamp-action/2',request_id:'unique-stable-id',operation:'execute',"
+        "args:{action_id:'execute_primitive',skill_id:'A01'|...|'A16',target_id?:'user'|'book',"
+        "options?:{...}}}. skill_id names the primitive; action_id is always "
+        "'execute_primitive'; every option goes INSIDE options. No 'skill', 'hold_mode', or "
+        "other fields at the top level. Only semantic args; A10 allows "
+        "options.hold_mode=holding with a calibrated target, e.g. "
+        "{protocol_version:'lamp-action/2',request_id:'light-on',operation:'execute',args:{"
+        "action_id:'execute_primitive',skill_id:'A10',target_id:'user',options:{hold_mode:'holding'"
+        "}}}. "
+        "End a held light via end_lighting or stop. Returns a receipt, not completion; query "
+        "get_state.",
         PropertyList(
             {Property("action_json", kPropertyTypeString).SetMaxLength(lamp::kMaxCommandBytes)}),
         [&executor](const PropertyList& args) -> ReturnValue {

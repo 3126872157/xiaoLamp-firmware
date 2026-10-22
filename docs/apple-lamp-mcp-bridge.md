@@ -32,7 +32,7 @@ MCP（官方服务与 ESP 的 JSON-RPC）和 `lamp-action/2`（设备与网页�
 | `self.lamp.get_state` | bridge_request_id 或 task_id，均可省略 | 无参数读带 available 的缓存状态；请求ID读凭据；任务ID异步提交新的 get_task 查询 |
 | `self.lamp.stop` | task_id（可选） | 高优先级 cancel，全局停止清理尚未发送的运动；不卸力 |
 | `self.lamp.execute_action` | action_json | 单个 execute 业务外壳；支持需标定的 A10 holding，不塞进有限组 |
-| `self.lamp.end_lighting` | 无 | 提交 end_lighting |
+| `self.lamp.end_lighting` | 无 | 提交 end_lighting；仅当 `get_state.light_supported` 为 true 时可用，无驱动时返回 UNAVAILABLE |
 | `self.lamp.configure_bridge` | url、token | 仅用户／操作员工具，NVS保存配置；不注册为模型自行选用的配置工具 |
 
 核心工具依赖 `LampActionExecutor` 的 Submit / Inspect / State / NewRequestId / Ready，

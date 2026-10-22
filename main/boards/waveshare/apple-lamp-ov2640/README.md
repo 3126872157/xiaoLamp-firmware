@@ -55,9 +55,16 @@ XCLK 频率 20 MHz。
 | 功能 | GPIO |
 |---|---|
 | BOOT 按键 | 0 |
+| 灯头 PWM 调光输出 | 1 |
 | 舵机 UART TX | 43 |
 | 舵机 UART RX | 44 |
 | 共地 | 所有外设 GND 连到 ESP32-S3 GND |
+
+灯头调光输出为 **单路 PWM、10 位占空比、20 kHz、高电平点亮**，接 LED 驱动/MOSFET 的
+调光或使能脚；`LAMP_LIGHT_GPIO` 定义在 [config.h](./config.h)。GPIO1 是本板唯一空闲的
+输出脚：相机 DVP/SCCB 占 GPIO4–18，音频占 GPIO38–42，舵机 UART 占 GPIO43/44，
+USB Serial/JTAG 占 GPIO19/20，Octal PSRAM 占 GPIO33–37，且 GPIO1 不是 ESP32-S3
+的 strapping 脚。灯头只有**单通道亮度**，没有色温或 RGB 通道。
 
 ## 实现说明
 
@@ -69,6 +76,10 @@ XCLK 频率 20 MHz。
 - 无 CH32V003 IO 扩展器：RESET/PWDN 置 NC，删除扩展器初始化与 I2C 总线。
 - AEC 关闭（PDM 单麦 + 功放无回采参考，与 ov3660 一致）。
 - 舵机 UART 固定 GPIO43(TX)/44(RX)，沿用台灯领域代码，无需改动。
+- 灯头调光由 [lamp_light.cc](./lamp_light.cc) 驱动。相机 XCLK 已占用 LEDC
+  `TIMER_0`/`CHANNEL_0`，调光因此固定用 `TIMER_1`/`CHANNEL_1`；ESP32-S3 的 LEDC
+  各定时器必须共用同一时钟源，所以两边都用 `LEDC_AUTO_CLK`，不指定具体时钟。
+  初始化失败时 `light_supported` 保持 false，`A10` 会被明确拒绝而不是假装成功。
 
 ## 联网路径：小智后台 vs 直连 Qwen
 
@@ -134,9 +145,9 @@ python scripts/build_lamp_variant.py --board apple-lamp-ov2640 --role omni-poc
 
 ### 设备端本地 MCP 服务器（`self.lamp.*`，不归云端 Qwen 调用）
 
-由 [lamp_bridge.cc](./lamp_bridge.cc) 的 `RegisterLampTools()` 注册，共 10 个 +
+由 [lamp_bridge.cc](./lamp_bridge.cc) 的 `RegisterLampTools()` 注册，共 11 个 +
 1 个用户专用工具：`list_primitives`、`run_sequence`、`get_state`、`stop`、
-`execute_action`、`end_lighting`、`rest`、`release_torque`、`enable_torque`、
+`execute_action`、`end_lighting`、`set_light`、`rest`、`release_torque`、`enable_torque`、
 `record_calibration`、`configure_bridge`（用户专用）。
 
 这套走设备端 MCP 服务器路径（`local-*` / `local-twin` 角色与电脑桥），在 omni 协议里
@@ -147,6 +158,28 @@ python scripts/build_lamp_variant.py --board apple-lamp-ov2640 --role omni-poc
 ```powershell
 python scripts/build_lamp_variant.py --board apple-lamp-ov2640 --role edge-runtime
 ```
+
+## 灯光语义（灯头调光）
+
+`self.lamp.get_state` 的 `light_supported` 由 PWM 初始化结果决定，`light_on`/`light_level`
+反映当前输出；只有 `light_supported=true` 时 `list_primitives` 才公布 `A10`。
+
+| 语义 | 行为 |
+|---|---|
+| `set_light(brightness)` | 直接设定灯头亮度 `brightness`（0.0=关，1.0=最亮）；纯输出，任何状态下都可调用，不动姿态、不卸力 |
+| `A10` 聚光指示（`hold_mode=timed`，默认） | 对准目标后按本地预设 `brightness` 淡入，保持 `holdSec` 后熄灭 |
+| `A10` 聚光指示（`hold_mode=holding`） | 对准目标后灯光保持常亮，直到 `end_lighting` 或 `rest` |
+| `A16` 强调（`lightGain > 1`） | 与身体脉冲同节拍闪亮，峰值亮度把 `lightGain` 的 1.0–1.5 映射到 0–100% |
+| `end_lighting` | 立即关闭 PWM 输出（等价 `set_light(0)`），不动姿态、不卸力；无驱动时明确返回 `UNAVAILABLE` |
+| `rest` | 先关灯，再回坐姿并卸力 |
+
+- `set_light` 是简化后的直接调光入口，`brightness` 取 0.0–1.0，映射到 10 位 PWM 占空比；
+  其余复合动作（A10/A16）仍按本地预设 `brightness` 0.1–1 / `lightGain` 1–1.5 驱动灯光。
+- 点亮是纯输出：`set_light` / `end_lighting` 不受运动使能、手动占用、示教占用或 BUSY
+  限制；但 `A10` 自身含对准动作，仍走正常运动授权。
+- 本任务点亮的灯在运动失败或被抢占时会被关掉；`holding` 完成后的常亮由操作者用
+  `end_lighting`（或 `set_light(0)`）结束。
+- 只有亮度，没有色温/RGB 通道；上电默认关闭。
 
 ## 摄像头与视觉接入（AI 如何「看」）
 

@@ -48,13 +48,19 @@ bool IsQuery(const std::string& operation) {
     return operation == "get_state" || operation == "get_task" || operation == "discover";
 }
 bool IsControl(const std::string& operation) {
-    return operation == "cancel" || operation == "end_lighting" || operation == "set_torque" ||
-           operation == "rest";
+    return operation == "cancel" || operation == "end_lighting" || operation == "set_light" ||
+           operation == "set_torque" || operation == "rest";
 }
 std::string TorqueCommand(const std::string& id, bool enabled) {
     CJsonUniquePtr command(cJSON_Parse(lamp::Query("set_torque", id).c_str()));
     cJSON_AddBoolToObject(cJSON_GetObjectItemCaseSensitive(command.get(), "args"), "enabled",
                           enabled);
+    return lamp::Encode(command.get());
+}
+std::string LightCommand(const std::string& id, double brightness) {
+    CJsonUniquePtr command(cJSON_Parse(lamp::Query("set_light", id).c_str()));
+    cJSON_AddNumberToObject(cJSON_GetObjectItemCaseSensitive(command.get(), "args"), "brightness",
+                            brightness);
     return lamp::Encode(command.get());
 }
 bool ValidUrl(std::string url) {
@@ -564,19 +570,31 @@ void RegisterLampTools(LampActionExecutor& executor) {
                                                        cJSON_CreateString("hardware_read_only"));
             }
             if (role == "local_uart_hardware") {
-                auto* primitives = cJSON_GetObjectItemCaseSensitive(catalog.get(), "primitives");
-                for (int i = cJSON_GetArraySize(primitives) - 1; i >= 0; --i)
-                    if (lamp::Text(cJSON_GetArrayItem(primitives, i), "id") == "A10")
-                        cJSON_DeleteItemFromArray(primitives, i);
-                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "total",
-                                                       cJSON_CreateNumber(12));
+                // The executor reports whether this board really has a dimmer, so the
+                // catalog never advertises A10 while the PWM output is missing.
+                const bool light =
+                    cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(state.get(), "light_supported"));
+                if (!light) {
+                    auto* primitives =
+                        cJSON_GetObjectItemCaseSensitive(catalog.get(), "primitives");
+                    for (int i = cJSON_GetArraySize(primitives) - 1; i >= 0; --i)
+                        if (lamp::Text(cJSON_GetArrayItem(primitives, i), "id") == "A10")
+                            cJSON_DeleteItemFromArray(primitives, i);
+                    cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "total",
+                                                           cJSON_CreateNumber(12));
+                }
                 cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "execution",
                                                        cJSON_CreateString("hardware_feedback"));
                 cJSON_AddBoolToObject(catalog.get(), "requires_operator_enable",
                                       cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(
                                           state.get(), "requires_operator_enable")));
-                cJSON_AddStringToObject(catalog.get(), "lighting",
-                                        "No physical light driver; A10 unavailable, A16 body only");
+                cJSON_AddBoolToObject(catalog.get(), "light_supported", light);
+                cJSON_AddStringToObject(
+                    catalog.get(), "lighting",
+                    light ? "set_light(brightness 0..1) drives the lamp head PWM dimmer in any "
+                            "state; A10/A16 still add motion-timed/pulse lighting; "
+                            "hold_mode=holding keeps A10 on until end_lighting or rest"
+                          : "No physical light driver; A10 unavailable, A16 body only");
             }
             return lamp::Encode(catalog.get());
         });
@@ -650,10 +668,18 @@ void RegisterLampTools(LampActionExecutor& executor) {
         });
     mcp.AddTool(
         "self.lamp.execute_action",
-        "Submit one lamp-action/2 execute envelope via action_json. "
-        "Only semantic args; permits A10 options.hold_mode=holding with a calibrated target. End "
-        "via end_lighting or stop. "
-        "Returns a receipt, not completion; query get_state.",
+        "Submit ONE lamp-action/2 execute command as a complete JSON envelope. The exact shape "
+        "is {protocol_version:'lamp-action/2',request_id:'unique-stable-id',operation:'execute',"
+        "args:{action_id:'execute_primitive',skill_id:'A01'|...|'A16',target_id?:'user'|'book',"
+        "options?:{...}}}. skill_id names the primitive; action_id is always "
+        "'execute_primitive'; every option goes INSIDE options. No 'skill', 'hold_mode', or "
+        "other fields at the top level. Only semantic args; A10 allows "
+        "options.hold_mode=holding with a calibrated target, e.g. "
+        "{protocol_version:'lamp-action/2',request_id:'light-on',operation:'execute',args:{"
+        "action_id:'execute_primitive',skill_id:'A10',target_id:'user',options:{hold_mode:'holding'"
+        "}}}. "
+        "End a held light via end_lighting or stop. Returns a receipt, not completion; query "
+        "get_state.",
         PropertyList(
             {Property("action_json", kPropertyTypeString).SetMaxLength(lamp::kMaxCommandBytes)}),
         [&executor](const PropertyList& args) -> ReturnValue {
@@ -666,11 +692,24 @@ void RegisterLampTools(LampActionExecutor& executor) {
             return executor.Submit(*command);
         });
     mcp.AddTool("self.lamp.end_lighting",
-                "End persistent lighting using the executor's end_lighting operation. Does not "
-                "release torque.",
+                "Turn the lamp head off. Equivalent to set_light(0). Only available where "
+                "get_state reports light_supported. Does not release torque or move the pose.",
                 PropertyList(), [&executor](const PropertyList&) -> ReturnValue {
                     return executor.Submit(lamp::Query("end_lighting", executor.NewRequestId()));
                 });
+    mcp.AddTool(
+        "self.lamp.set_light",
+        "Set the lamp head brightness directly: 0.0 is off, 1.0 is full brightness. Pure "
+        "output that works in ANY state (busy, manual control, teaching, disarmed, any mode or "
+        "calibration) and never moves the pose or touches torque. Independent of A10/A16 motion "
+        "lighting; an A10 timed hold or rest still turns the light off afterwards. 0.0 is "
+        "equivalent to end_lighting. Returns completed once the duty is written; UNAVAILABLE "
+        "when this board has no physical dimmer.",
+        PropertyList({Property("brightness", kPropertyTypeNumber, 0.0, 1.0)}),
+        [&executor](const PropertyList& args) -> ReturnValue {
+            return executor.Submit(
+                LightCommand(executor.NewRequestId(), args["brightness"].value<double>()));
+        });
     mcp.AddTool(
         "self.lamp.rest",
         "Goodbye/go rest: cancel old motion, move to standard sit, THEN release torque. "

@@ -41,6 +41,9 @@ private:
     bool armed_ = false;
     bool manual_ = false;
     bool teaching_owned_ = false;
+    // Set while the running task owns the lamp output, so a failure or an
+    // emergency stop cannot leave a light on that nobody asked to keep.
+    bool light_owned_ = false;
     std::optional<lamp::pose::Pose> last_target_;
     std::string SubmitChecked(const std::string& body, bool panel);
     bool SaveInstallation(const cJSON* mapping);
@@ -60,7 +63,14 @@ private:
     bool Write(unsigned id, uint8_t cmd, std::initializer_list<uint8_t> params = {});
     bool Target(const lamp::pose::Pose& q, unsigned milliseconds, uint32_t token);
     bool Torque(bool enabled, uint32_t token);
-    bool Play(const lamp::pose::Plan& plan, uint32_t token);
+    // Optional lamp dimmer track; a null cue leaves the current light untouched.
+    struct LightCue {
+        enum class Shape { Fade, Pulse };
+        Shape shape = Shape::Fade;
+        double start = 0, window = 0, cycles = 1, level = 1;
+    };
+    static double CueLevel(const LightCue& cue, double elapsed);
+    bool Play(const lamp::pose::Plan& plan, uint32_t token, const LightCue* cue = nullptr);
     bool RecordCalibration(const std::string& target, uint32_t token);
     void Finish(const std::string& id, const std::string& status, const std::string& reason);
     std::string Receipt(const std::string& id, const Record& record);

@@ -12,10 +12,16 @@
 #include "application.h"
 #include "lamp_bus_protocol.h"
 #include "lamp_delivery_model.h"
+#include "lamp_light.h"
 #include "lamp_pose_model.h"
 namespace {
 const cJSON* Item(const cJSON* o, const char* key) {
     return cJSON_GetObjectItemCaseSensitive(o, key);
+}
+// Local preset values are the only numeric bounds the model may not change.
+double Preset(const cJSON* configuration, const char* skill, const char* field, double fallback) {
+    const auto* value = Item(Item(Item(configuration, "action_presets"), skill), field);
+    return cJSON_IsNumber(value) ? value->valuedouble : fallback;
 }
 std::string Error(const char* code, const std::string& reason) {
     CJsonUniquePtr o(cJSON_CreateObject());
@@ -531,6 +537,42 @@ std::string LampHardwareExecutor::SubmitChecked(const std::string& body, bool pa
         return it->second.signature == sig
                    ? Receipt(id, it->second)
                    : Error("REQUEST_ID_CONFLICT", "Request ID reused with different content");
+    if (op == "end_lighting") {
+        // Lighting is a pure output: no servo, no arm state and no motion queue,
+        // so it must not be blocked by BUSY, manual control or teaching.
+        if (!lamp::light::Available())
+            return Error("UNAVAILABLE", "This board has no physical lamp dimmer");
+        lamp::light::SetLevel(0);
+        while (order_.size() >= 32) {
+            records_.erase(order_.front());
+            order_.pop_front();
+        }
+        records_[id] = {sig, op, "completed", "Lamp PWM output off; motion untouched"};
+        order_.push_back(id);
+        RecordDiagnostic("task", id, Receipt(id, records_[id]));
+        return Receipt(id, records_[id]);
+    }
+    if (op == "set_light") {
+        // Direct brightness is a pure output like end_lighting: never blocked by
+        // BUSY, manual control, teaching, mode, calibration or disarm state.
+        if (!lamp::light::Available())
+            return Error("UNAVAILABLE", "This board has no physical lamp dimmer");
+        const auto* brightness = Item(args, "brightness");
+        if (!cJSON_IsNumber(brightness) || !std::isfinite(brightness->valuedouble))
+            return Error("INVALID_REQUEST", "brightness must be a number between 0 and 1");
+        const double level = std::clamp(brightness->valuedouble, 0.0, 1.0);
+        lamp::light::SetLevel(level);
+        while (order_.size() >= 32) {
+            records_.erase(order_.front());
+            order_.pop_front();
+        }
+        records_[id] = {sig, op, "completed",
+                        level <= 0.0 ? "Lamp PWM output off; motion untouched"
+                                     : "Lamp PWM brightness set; motion untouched"};
+        order_.push_back(id);
+        RecordDiagnostic("task", id, Receipt(id, records_[id]));
+        return Receipt(id, records_[id]);
+    }
     const bool emergency =
         op == "cancel" || (op == "set_torque" && cJSON_IsFalse(Item(args, "enabled")));
     if (!live_ || (!configuration_ && !emergency && !(panel && op == "install")))
@@ -612,7 +654,10 @@ std::string LampHardwareExecutor::State() {
     cJSON_AddBoolToObject(o.get(), "busy", !active_.empty() || !queued_.empty());
     cJSON_AddBoolToObject(o.get(), "requires_operator_enable", !armed_);
     cJSON_AddBoolToObject(o.get(), "explicit_motion_can_enable", !manual_ && !teaching_owned_);
-    cJSON_AddBoolToObject(o.get(), "light_supported", false);
+    const bool light = lamp::light::Available();
+    cJSON_AddBoolToObject(o.get(), "light_supported", light);
+    cJSON_AddBoolToObject(o.get(), "light_on", light && lamp::light::Level() > 0);
+    cJSON_AddNumberToObject(o.get(), "light_level", light ? lamp::light::Level() : 0);
     auto* calibrations = cJSON_AddObjectToObject(o.get(), "calibrated_targets");
     for (int m = 0; m < 3; m++) {
         auto* targets = cJSON_AddArrayToObject(calibrations, Modes[m]);
@@ -646,7 +691,8 @@ std::string LampHardwareExecutor::State() {
     cJSON_AddBoolToObject(o.get(), "torque_enabled_confirmed", torque);
     cJSON_AddBoolToObject(o.get(), "unloaded_confirmed", unloaded);
     auto* supported = cJSON_AddArrayToObject(o.get(), "unsupported_primitives");
-    cJSON_AddItemToArray(supported, cJSON_CreateString("A10"));
+    if (!light)
+        cJSON_AddItemToArray(supported, cJSON_CreateString("A10"));
     if (!active_.empty())
         cJSON_AddStringToObject(o.get(), "active_task", ("hardware-" + active_).c_str());
     if (!order_.empty()) {
@@ -791,7 +837,18 @@ bool LampHardwareExecutor::Torque(bool enabled, uint32_t token) {
         io_error_ = first_error;
     return ok;
 }
-bool LampHardwareExecutor::Play(const lamp::pose::Plan& plan, uint32_t token) {
+double LampHardwareExecutor::CueLevel(const LightCue& cue, double elapsed) {
+    if (elapsed <= cue.start)
+        return 0;
+    const double u = cue.window > 0 ? std::min((elapsed - cue.start) / cue.window, 1.) : 1.;
+    if (cue.shape == LightCue::Shape::Fade)
+        return cue.level * u;
+    // Mirrors Curve::Pulse in lamp_pose_plan.cc so the light emphasises the same
+    // beats as the body pulse instead of drifting against it.
+    return cue.level *
+           std::sin(std::numbers::pi * std::fmod(std::min(u, 1 - 1e-9) * cue.cycles, 1.));
+}
+bool LampHardwareExecutor::Play(const lamp::pose::Plan& plan, uint32_t token, const LightCue* cue) {
     const auto start = esp_timer_get_time();
     int64_t last_feedback = start;
     lamp::pose::Pose actual;
@@ -802,6 +859,8 @@ bool LampHardwareExecutor::Play(const lamp::pose::Plan& plan, uint32_t token) {
             return false;
         const double elapsed = (esp_timer_get_time() - start) / 1e6;
         const auto target = plan.At(std::min(elapsed + .04, plan.Duration()));
+        if (cue)
+            lamp::light::SetLevel(CueLevel(*cue, elapsed));
         if (!Target(target, 120, token))
             return false;
         if (esp_timer_get_time() - last_feedback >= 120000) {
@@ -982,6 +1041,10 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
         records_.at(id).status = "running";
     }
     auto failure = [&](const std::string& why) {
+        if (light_owned_) {
+            lamp::light::SetLevel(0);
+            light_owned_ = false;
+        }
         const bool stopped = StopMotors();
         {
             std::lock_guard lock(mutex_);
@@ -1031,7 +1094,23 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
         return;
     }
     if (op == "end_lighting") {
-        Finish(id, "failed", "No physical light driver; no simulated success");
+        // SubmitChecked answers lighting synchronously; keep the same invariant
+        // here so a queued lighting request can never fall through to motion.
+        if (lamp::light::Available()) {
+            lamp::light::SetLevel(0);
+            Finish(id, "completed", "Lamp PWM output off; motion untouched");
+        } else
+            Finish(id, "failed", "No physical light driver; no simulated success");
+        return;
+    }
+    if (op == "set_light") {
+        // Same invariant as end_lighting: a queued brightness request must not
+        // fall through to the motion path.
+        if (lamp::light::Available()) {
+            lamp::light::SetLevel(std::clamp(Item(args, "brightness")->valuedouble, 0.0, 1.0));
+            Finish(id, "completed", "Lamp PWM brightness set; motion untouched");
+        } else
+            Finish(id, "failed", "No physical light driver; no simulated success");
         return;
     }
     bool enable_for_request = false;
@@ -1187,6 +1266,8 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
     }
     CJsonUniquePtr steps(cJSON_CreateArray());
     if (op == "rest") {
+        if (lamp::light::Available())
+            lamp::light::SetLevel(0);
         auto* s = cJSON_CreateObject();
         cJSON_AddStringToObject(s, "action_id", "set_mode");
         cJSON_AddStringToObject(s, "mode", "sit");
@@ -1196,6 +1277,9 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
     else
         cJSON_AddItemToArray(steps.get(), cJSON_Duplicate(args, true));
     std::vector<lamp::pose::Plan> plans;
+    // One optional dimmer track per plan; a step without a track leaves the lamp alone.
+    std::vector<std::optional<LightCue>> tracks;
+    std::vector<bool> latching;
     int mode;
     {
         std::lock_guard lock(mutex_);
@@ -1203,22 +1287,62 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
     }
     double duration = 0;
     bool limited = false;
+    bool light_hold = false;
     for (const auto* s = steps->child; s; s = s->next) {
         CJsonUniquePtr semantic(cJSON_Duplicate(s, true));
         cJSON_DeleteItemFromObjectCaseSensitive(semantic.get(), "context");
+        const auto skill = lamp::Text(semantic.get(), "skill_id");
         auto plan = lamp::pose::Build(*configuration_, mode, current, semantic.get(),
                                       Item(args, "context") != nullptr);
-        if (lamp::Text(semantic.get(), "skill_id") == "A16" && plan.requires_light) {
+        const bool dimmer = plan.requires_light && lamp::light::Available();
+        if (plan.requires_light && !dimmer) {
+            // A16 without a dimmer is still a body emphasis; A10 is a lighting action.
+            if (skill != "A16") {
+                reject("This preset requires a physical light driver");
+                return;
+            }
             plan.requires_light = false;
             plan.limited = true;
         }
-        if (!plan.ok || !std::isfinite(plan.Duration()) || plan.requires_light) {
-            reject(plan.requires_light ? "This preset requires a physical light driver"
-                                       : plan.error);
+        // A10 hold_mode=holding ends with an unbounded hold: the operator keeps the
+        // light on, so only the finite aim/fade prefix is played.
+        const bool latch = !plan.phases.empty() && !std::isfinite(plan.phases.back().duration);
+        lamp::pose::Plan motion = plan;
+        while (!motion.phases.empty() && !std::isfinite(motion.phases.back().duration))
+            motion.phases.pop_back();
+        if (!plan.ok || !std::isfinite(motion.Duration())) {
+            reject(plan.error.empty() ? "Plan has no bounded motion" : plan.error);
             return;
         }
+        std::optional<LightCue> cue;
+        if (dimmer && !motion.phases.empty()) {
+            // A10 fades in over its first hold phase; A16 pulses with the body pulse.
+            size_t index = 0;
+            while (index < motion.phases.size() &&
+                   motion.phases[index].curve != lamp::pose::Curve::Pulse)
+                ++index;
+            if (index == motion.phases.size())
+                index = 0;
+            const auto& phase = motion.phases[index];
+            LightCue make;
+            make.start = plan.prepare_duration;
+            for (size_t i = 0; i < index; i++)
+                make.start += motion.phases[i].duration;
+            make.window = phase.duration;
+            if (phase.curve == lamp::pose::Curve::Pulse) {
+                // The A16 lightGain range 1.0-1.5 maps onto a 0-100% pulse peak.
+                const double gain = Preset(configuration_->source.get(), "A16", "lightGain", 1.15);
+                make.shape = LightCue::Shape::Pulse;
+                make.cycles = std::max(1., phase.cycles);
+                make.level = std::clamp((gain - 1.) / (1.5 - 1.), 0., 1.);
+            } else
+                make.level = std::clamp(
+                    Preset(configuration_->source.get(), skill.c_str(), "brightness", 1.), 0., 1.);
+            cue = make;
+        }
         for (unsigned n = 0; n <= 120; n++) {
-            auto ticks = lamp::pose::ToTicks(*configuration_, plan.At(plan.Duration() * n / 120));
+            auto ticks =
+                lamp::pose::ToTicks(*configuration_, motion.At(motion.Duration() * n / 120));
             bool reachable = ticks.has_value();
             if (ticks)
                 for (unsigned j = 0; j < 5; j++)
@@ -1229,24 +1353,37 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
                 return;
             }
         }
-        duration += plan.Duration();
+        duration += motion.Duration();
         if (duration > 60) {
             reject("Group exceeds 60 seconds");
             return;
         }
-        current = plan.At(plan.Duration());
+        current = motion.At(motion.Duration());
         mode = plan.mode_after;
         limited |= plan.limited;
-        plans.push_back(std::move(plan));
+        latching.push_back(cue.has_value() && latch);
+        tracks.push_back(cue);
+        plans.push_back(std::move(motion));
     }
     {
         std::lock_guard lock(mutex_);
         records_.at(id).total = plans.size();
     }
     for (unsigned i = 0; i < plans.size(); i++) {
-        if (epoch_ != token || !Play(plans[i], token)) {
+        if (tracks[i])
+            light_owned_ = true;
+        if (epoch_ != token || !Play(plans[i], token, tracks[i] ? &*tracks[i] : nullptr)) {
             failure(io_error_.empty() ? "Motion interrupted or feedback unavailable" : io_error_);
             return;
+        }
+        if (tracks[i]) {
+            light_owned_ = false;
+            if (latching[i]) {
+                // Persistent lighting: it stays on until an explicit end_lighting.
+                lamp::light::SetLevel(tracks[i]->level);
+                light_hold = true;
+            } else
+                lamp::light::SetLevel(0);
         }
         {
             std::lock_guard lock(mutex_);
@@ -1265,10 +1402,13 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
             rest_at_ = esp_timer_get_time();
         }
     }
-    Finish(id, limited ? "limited" : "completed",
-           limited ? "Reached available trajectory; amplitude may be limited; A16 light omitted "
-                     "because no driver"
-                   : "Final measured positions confirmed");
+    std::string reason = limited ? "Reached available trajectory; amplitude may be limited"
+                                 : "Final measured positions confirmed";
+    if (limited && !lamp::light::Available())
+        reason += "; A16 light omitted because no driver";
+    if (light_hold)
+        reason += "; lamp on until end_lighting";
+    Finish(id, limited ? "limited" : "completed", reason);
 }
 void LampHardwareExecutor::RunHardware(void* self) {
     static_cast<LampHardwareExecutor*>(self)->HardwareLoop();

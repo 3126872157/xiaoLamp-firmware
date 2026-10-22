@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <iostream>
@@ -13,6 +14,10 @@
 #include "lamp_hardware_executor.h"
 #include "lamp_hardware_platform.h"
 #include "lamp_pose_model.h"
+#if LAMP_TEST_PWM_LIGHT
+#include "config.h"
+#include "lamp_light.h"
+#endif
 namespace {
 std::mutex bus_mutex;
 std::deque<uint8_t> rx;
@@ -206,6 +211,33 @@ int nvs_set_blob(nvs_handle_t, const char* key, const void* data, size_t n) {
     return 0;
 }
 int nvs_commit(nvs_handle_t) { return 0; }
+int ledc_gpio = -1;
+uint32_t ledc_duty = 0, ledc_peak = 0;
+int ledc_timer_config(const ledc_timer_config_t* c) {
+    assert(c->speed_mode == LEDC_LOW_SPEED_MODE && c->timer_num == LEDC_TIMER_1);
+    assert(c->duty_resolution == LEDC_TIMER_10_BIT);
+    return 0;
+}
+int ledc_channel_config(const ledc_channel_config_t* c) {
+    // Timer 0 / channel 0 stay reserved for the camera XCLK.
+    assert(c->speed_mode == LEDC_LOW_SPEED_MODE && c->channel == LEDC_CHANNEL_1 &&
+           c->timer_sel == LEDC_TIMER_1);
+    assert(c->flags.output_invert == 0 && c->duty == 0);
+    ledc_gpio = c->gpio_num;
+    ledc_duty = c->duty;
+    return 0;
+}
+int ledc_set_duty(ledc_mode_t, ledc_channel_t channel, uint32_t duty) {
+    assert(channel == LEDC_CHANNEL_1 && duty <= 1023);
+    ledc_duty = duty;
+    ledc_peak = std::max(ledc_peak, duty);
+    return 0;
+}
+int ledc_update_duty(ledc_mode_t, ledc_channel_t channel) {
+    assert(channel == LEDC_CHANNEL_1);
+    return 0;
+}
+int ledc_stop(ledc_mode_t, ledc_channel_t, uint32_t) { return 0; }
 int psa_crypto_init() { return 0; }
 int psa_hash_compute(int, const unsigned char* text, size_t n, unsigned char* out, size_t,
                      size_t* size) {
@@ -222,6 +254,12 @@ Application& Application::GetInstance() {
     return app;
 }
 int main() {
+#if LAMP_TEST_PWM_LIGHT
+    // This board variant carries the lamp head dimmer on LEDC timer 1.
+    assert(lamp::light::Init(LAMP_LIGHT_GPIO));
+    assert(lamp::light::Available());
+    assert(ledc_gpio == LAMP_LIGHT_GPIO && ledc_duty == 0);
+#endif
     auto cfg = lamp::pose::ParseConfiguration(lamp::pose::kDeviceConfiguration);
     assert(cfg);
     auto reloaded = lamp::pose::ParseConfiguration(lamp::Encode(cfg->source.get()));
@@ -580,7 +618,57 @@ int main() {
     Submit(*bad, "emergency-release", "set_torque", R"({"enabled":false})");
     assert(Wait(*bad, "emergency-release") == "completed");
     StopTasks();
+    // Lamp head dimmer: the reported capability and the A10/A16 duty mapping.
+    saved = old;
+    auto* dimmer = new LampHardwareExecutor();
+    assert(dimmer->Ready());
+    const bool lit = cJSON_IsTrue(Item(Json(dimmer->State()).get(), "light_supported"));
+#if LAMP_TEST_PWM_LIGHT
+    assert(lit);
+    assert(cJSON_IsFalse(Item(Json(dimmer->State()).get(), "light_on")));
+    const double brightness =
+        Item(Item(Item(cfg->source.get(), "action_presets"), "A10"), "brightness")->valuedouble;
+    const uint32_t full = static_cast<uint32_t>(std::lround(brightness * 1023));
+    Submit(
+        *dimmer, "light-hold", "execute",
+        R"({"action_id":"execute_primitive","skill_id":"A10","target_id":"user","options":{"hold_mode":"holding"}})");
+    const auto hold = Wait(*dimmer, "light-hold");
+    assert(hold == "completed" || hold == "limited");
+    // A10 holding latches the preset brightness instead of fading back out.
+    assert(ledc_duty == full);
+    assert(cJSON_IsTrue(Item(Json(dimmer->State()).get(), "light_on")));
+    Submit(*dimmer, "light-end", "end_lighting");
+    assert(Wait(*dimmer, "light-end") == "completed");
+    assert(ledc_duty == 0);
+    ledc_peak = 0;
+    Submit(*dimmer, "light-pulse", "execute",
+           R"({"action_id":"execute_primitive","skill_id":"A16"})");
+    const auto pulse = Wait(*dimmer, "light-pulse");
+    assert(pulse == "completed" || pulse == "limited");
+    assert(ledc_peak > 0 && ledc_duty == 0);
+    // Local preset lightGain 1.15 maps onto a 30% pulse peak.
+    assert(ledc_peak <= static_cast<uint32_t>(std::lround(0.3 * 1023)) + 1);
+    // Direct brightness: set_light is a pure output usable in any state and maps
+    // the 0..1 level straight to the PWM duty; 0 is off.
+    Submit(*dimmer, "light-set-half", "set_light", R"({"brightness":0.5})");
+    assert(Wait(*dimmer, "light-set-half") == "completed");
+    assert(ledc_duty == static_cast<uint32_t>(std::lround(0.5 * 1023)));
+    assert(cJSON_IsTrue(Item(Json(dimmer->State()).get(), "light_on")));
+    Submit(*dimmer, "light-set-off", "set_light", R"({"brightness":0})");
+    assert(Wait(*dimmer, "light-set-off") == "completed");
+    assert(ledc_duty == 0);
+    assert(cJSON_IsFalse(Item(Json(dimmer->State()).get(), "light_on")));
+#else
+    // A board without the PWM output must keep the capability and the action off.
+    assert(!lit);
+    Submit(*dimmer, "light-off-board", "execute",
+           R"({"action_id":"execute_primitive","skill_id":"A10","target_id":"user"})");
+    assert(Wait(*dimmer, "light-off-board") == "failed");
+    auto ended = Json(dimmer->Submit(Command("light-end", "end_lighting")));
+    assert(lamp::Text(Item(ended.get(), "error"), "code") == "UNAVAILABLE");
+#endif
+    StopTasks();
     std::cout << "PASS hardware emulator: disarmed boot, no-jump enable, play, dedup, preflight, "
                  "cancel, unload, NVS reboot/failure, group, lost feedback, unreachable end, rest, "
-                 "invalid configuration emergency unload\n";
+                 "invalid configuration emergency unload, lamp dimmer\n";
 }

@@ -6,6 +6,7 @@
 #include "lamp_bridge.h"
 #include "lamp_delivery.h"
 #include "lamp_hardware_executor.h"
+#include "lamp_light.h"
 #if CONFIG_APPLE_LAMP_EDGE_RUNTIME
 #include "lamp_edge_runtime.h"
 #include "lamp_vision.h"
@@ -40,6 +41,15 @@ private:
         });
         boot_button_.OnLongPress(
             [this]() { Application::GetInstance().Schedule([this]() { EnterWifiConfigMode(); }); });
+    }
+
+    void InitializeLight() {
+        // PWM dimmer for the lamp head; the camera XCLK keeps LEDC timer 0.
+        if (lamp::light::Init(LAMP_LIGHT_GPIO))
+            ESP_LOGI(TAG, "Lamp dimmer ready on GPIO%d", LAMP_LIGHT_GPIO);
+        else
+            ESP_LOGW(TAG, "Lamp dimmer unavailable on GPIO%d; lighting stays unsupported",
+                     LAMP_LIGHT_GPIO);
     }
 
     void InitializeCamera() {
@@ -87,6 +97,7 @@ public:
             lv_init();
         }
         InitializeButtons();
+        InitializeLight();
         InitializeCamera();
 #if CONFIG_APPLE_LAMP_HARDWARE_MOTION
         auto* hardware = new LampHardwareExecutor();
