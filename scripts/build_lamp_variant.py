@@ -132,9 +132,10 @@ def flash(manifest_path: Path, role: str, port: str):
 
 def main():
     parser = argparse.ArgumentParser(__doc__)
-    parser.add_argument("--role", choices=ROLES, required=True)
-    parser.add_argument("--board", choices=BOARDS, default="apple-lamp-ov3660",
-                        help="Target board identity (default: apple-lamp-ov3660)")
+    parser.add_argument("--role", choices=ROLES, default="xiaozhi-delivery",
+                        help="Firmware role (default: xiaozhi-delivery)")
+    parser.add_argument("--board", choices=BOARDS, default="apple-lamp-ov2640",
+                        help="Target board identity (default: apple-lamp-ov2640)")
     parser.add_argument("--archive-only", action="store_true", help="Validate/archive existing build; does not guess role")
     parser.add_argument("--flash", action="store_true")
     parser.add_argument("--port")

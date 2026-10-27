@@ -39,6 +39,8 @@ for(let i=0;i<5;i++){const label=document.createElement('label'),input=document.
 for(const [key,label,min,max,step] of dFields){const l=document.createElement('label'),input=document.createElement('input');input.type='number';input.id='d-opt-'+key;Object.assign(input,{min,max,step});l.append(document.createTextNode(label+' '),input);$('d-tuning').append(l)}
 for(const [key,label] of [['yaw_sign','书在画面右侧，Yaw调整符号'],['pitch_sign','书在画面下侧，灯头Pitch调整符号']]){const l=document.createElement('label'),s=document.createElement('select');s.id='d-opt-'+key;for(const [v,t] of [[0,'未确认'],[1,'+1'],[-1,'−1']]){const o=document.createElement('option');o.value=v;o.textContent=t;s.append(o)}l.append(document.createTextNode(label+' '),s);$('d-tuning').append(l)}
 function dTell(t){$('d-message').textContent=t}
+function dStorageBlock(){if(typeof state==='undefined'||!state)return '';if((typeof ds!=='undefined'&&ds&&ds.tracking_enabled)||state.tracking_enabled)return '先点“停止跟书（保留力矩）”';if(state.busy)return '硬件任务进行中，请等它完成';if(!state.manual_control)return '先点“进入手动测试”';if(!state.unloaded_confirmed)return '先点“卸力 · 先扶住灯臂”，等五轴扭矩都为 0';const stale=(state.servos||[]).findIndex(v=>!v.position_fresh);if(stale>=0)return 'ID '+(stale+1)+' 位置反馈过期，请检查舵机总线';if(!state.configuration_loaded||!state.available)return '五轴配置或反馈不可用，见“五轴反馈与诊断”';return ''}
+function dRequireStorage(){const r=dStorageBlock();if(r)throw Error('存储操作被阻止：'+r)}
 async function dRun(fn){try{await fn();await dRefresh()}catch(e){dTell(String(e));log('delivery_error',String(e))}}
 async function dCommand(operation,args={}){
  const request_id='delivery-'+Date.now().toString(36)+'-'+(++requestCounter);
@@ -56,7 +58,7 @@ async function dCommand(operation,args={}){
 }
 async function dRefresh(){if(dRefreshing)return;dRefreshing=true;try{
  ds=await api('delivery');$('d-teaching-status').textContent='示教状态：'+ds.teaching_status+'；'+(ds.frames?.length||0)+'帧';
- $('d-store').textContent=(ds.storage_ready?'动作分区已挂载':'动作分区不可用')+' · '+ds.storage_used+'/'+ds.storage_total+' bytes · '+(ds.storage_error||'');
+ $('d-store').textContent=(ds.storage_ready?'动作分区已挂载':'动作分区不可用')+' · '+ds.storage_used+'/'+ds.storage_total+' bytes · '+(ds.storage_error||'')+' · 前置条件：'+(dStorageBlock()||'已满足');
  const fk=JSON.stringify(ds.frames||[]);if(fk!==dFramesKey){dFramesKey=fk;$('d-frames').replaceChildren();(ds.frames||[]).forEach((f,i)=>{
   const row=document.createElement('div');row.className='cal-row';const txt=document.createElement('p');txt.textContent=(i===0?'基准帧':'关键帧'+(i+1))+' · '+Object.entries(f.pose_rad).map(([k,v])=>k+':'+(v*D).toFixed(1)+'°').join(' / ');
   const input=document.createElement('input');input.type='number';input.min=.2;input.max=10;input.step=.1;input.value=f.duration_sec;input.dataset.dFrame=i;input.disabled=i===0;
@@ -76,12 +78,12 @@ $('d-capture').onclick=()=>dRun(()=>dCommand('capture',{duration_sec:+$('d-time'
 $('d-end').onclick=()=>dRun(()=>dCommand('teach_end'));
 $('d-times').onclick=()=>dRun(()=>dCommand('set_times',{duration_sec:[...document.querySelectorAll('[data-d-frame]')].map(e=>+e.value)}));
 $('d-save').onclick=()=>dRun(()=>dCommand('save',{id:$('d-id').value,name:$('d-name').value,description:$('d-description').value,joints:[0,1,2,3,4].map(i=>$('d-joint-'+i).checked),end_mode:$('d-default-end').value}));
-$('d-format').onclick=()=>dRun(async()=>{if(confirm('仅清空用户动作分区。已有用户动作将丢失；确认已导出备份，且设备处于手动卸力状态？'))await dCommand('format',{confirm_erase_actions:true})});
+$('d-format').onclick=()=>dRun(async()=>{if(confirm('仅清空用户动作分区。已有用户动作将丢失；确认已导出备份，且设备处于手动卸力状态？')){dRequireStorage();await dCommand('format',{confirm_erase_actions:true})}});
 $('d-play').onclick=()=>dRun(()=>dCommand('play',{id:$('d-library').value,end_mode:$('d-play-end').value}));
 $('d-play-group').onclick=()=>dRun(()=>dCommand('play_group',{ids:$('d-group').value.split(',').map(s=>s.trim()).filter(Boolean),end_mode:$('d-play-end').value}));
 $('d-export').onclick=()=>dRun(async()=>{const r=await dCommand('export',{id:$('d-library').value});$('d-json').value=JSON.stringify(r.action,null,2)});
-$('d-delete').onclick=()=>dRun(async()=>{if(confirm('删除动作 '+$('d-library').value+'？'))await dCommand('delete',{id:$('d-library').value})});
-$('d-import').onclick=()=>dRun(()=>dCommand('import',{action:JSON.parse($('d-json').value)}));
+$('d-delete').onclick=()=>dRun(async()=>{if(confirm('删除动作 '+$('d-library').value+'？')){dRequireStorage();await dCommand('delete',{id:$('d-library').value})}});
+$('d-import').onclick=()=>dRun(async()=>{dRequireStorage();await dCommand('import',{action:JSON.parse($('d-json').value)})});
 $('d-file').onchange=()=>dRun(async()=>{const f=$('d-file').files[0];if(!f)return;if(f.size>12288)throw Error('文件超过12KiB');$('d-json').value=await f.text()});
 $('d-download').onclick=()=>dRun(async()=>{const data=JSON.parse($('d-json').value),a=document.createElement('a');const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));a.href=url;a.download='lamp-action-'+(data.id||'export')+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)});
 $('d-observe').onclick=()=>dRun(()=>dCommand('observe'));

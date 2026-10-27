@@ -376,9 +376,33 @@ private:
         RefreshCatalog();
         return "{\"ok\":true,\"stored\":true}";
     }
-    bool StorageControl(const cJSON* state) {
-        Pose q;
-        return Fresh(state, q, true) && !tracking_.load();
+    // Erasing or writing the action store never reads, plans or applies a pose, so
+    // it must not require the measured pose to sit inside the URDF joint limits.
+    // An unloaded arm frequently rests outside them (and before calibration the
+    // defaults alone can exceed them), which would otherwise block the very first
+    // initialization. Teaching capture still goes through Fresh() and does need a
+    // valid pose because it records joint values.
+    std::string StorageBlocked(const cJSON* state) {
+        if (tracking_.load())
+            return "stop tracking first";
+        if (cJSON_IsTrue(Get(state, "busy")))
+            return "hardware task busy; wait for it to finish";
+        if (!cJSON_IsTrue(Get(state, "manual_control")))
+            return "acquire manual control first";
+        if (!cJSON_IsTrue(Get(state, "unloaded_confirmed")))
+            return "confirm five-axis unload first; torque must read 0 on all five";
+        const auto* servos = Get(state, "servos");
+        for (int j = 0; j < 5; ++j)
+            if (!cJSON_IsTrue(Get(cJSON_GetArrayItem(servos, j), "position_fresh")))
+                return "position feedback stale for servo ID " + std::to_string(j + 1) +
+                       "; check the servo bus";
+        if (!GoodConfiguration(state))
+            return "five-axis configuration/feedback unavailable";
+        return "";
+    }
+    bool StorageControl(const cJSON* state, std::string& why) {
+        why = StorageBlocked(state);
+        return why.empty();
     }
     std::string Process(const Work& work) {
         CJsonUniquePtr root(cJSON_Parse(work.body.c_str()));
@@ -532,10 +556,9 @@ private:
             auto& app = Application::GetInstance();
             if (app.IsVoiceDetected() || app.GetDeviceState() == kDeviceStateSpeaking)
                 return Error("Wait for audio to be idle before changing Flash");
-            if (!StorageControl(state.get()))
-                return Error(
-                    "Storage changes require idle manual control and confirmed unloaded feedback; "
-                    "stop tracking first");
+            std::string why;
+            if (!StorageControl(state.get(), why))
+                return Error("Storage change blocked: " + why);
             if (op == "format") {
                 if (!cJSON_IsTrue(Get(args, "confirm_erase_actions")))
                     return Error("Explicit action partition erase confirmation required");
