@@ -103,7 +103,7 @@ USB Serial/JTAG 占 GPIO19/20，Octal PSRAM 占 GPIO33–37，且 GPIO1 不是 E
   `wss://<workspace>.<region>.maas.aliyuncs.com/api-ws/v1/realtime`。
 
 代码在 [application.cc](../../../../main/application.cc) 中按 `CONFIG_APPLE_LAMP_OMNI_REALTIME`
-选择协议；直连实现见 [omni_realtime_protocol.cc](../../../../main/protocols/omni_realtime_protocol.cc)。
+选择协议；直连实现见 [omni_realtime_protocol.cc](https://github.com/3126872157/xiaoLamp-firmware/blob/codex/edge-runtime-research/main/protocols/omni_realtime_protocol.cc)。
 
 要直连 Qwen，刷 omni 角色而非默认 simulator：
 
@@ -116,7 +116,7 @@ python scripts/build_lamp_variant.py --board apple-lamp-ov2640 --role omni-poc
 
 ## MCP 技能列表（云端 Qwen 可调用）
 
-云端模型可调用的技能由构建角色决定。[omni_contract.h](../../../../main/protocols/omni_contract.h)
+云端模型可调用的技能由构建角色决定。[omni_contract.h](https://github.com/3126872157/xiaoLamp-firmware/blob/codex/edge-runtime-research/main/protocols/omni_contract.h)
 的 `omni::Session()` 与 [lamp_edge_runtime.cc](./lamp_edge_runtime.cc) 的 `Tools()` 决定最终
 `session.update` 里的 `tools` 数组；协议层只接受已声明的工具名。
 
@@ -186,9 +186,9 @@ python scripts/build_lamp_variant.py --board apple-lamp-ov2640 --role edge-runti
 ## 摄像头与视觉接入（AI 如何「看」）
 
 **重要：当前没有任何 `lamp_*` 工具让 AI 主动说「拍照看看」。** 摄像头图像不是通过 MCP
-工具触发，而是由 [OmniRealtimeProtocol](../../../../main/protocols/omni_realtime_protocol.cc)
+工具触发，而是由 [OmniRealtimeProtocol](https://github.com/3126872157/xiaoLamp-firmware/blob/codex/edge-runtime-research/main/protocols/omni_realtime_protocol.cc)
 通过面板路径接入云端模型（`OmniSetVision` 注册的图像源 [lamp_vision.h](./lamp_vision.h)
-用 [Esp32Camera::CaptureJpeg](../../../common/esp32_camera.cc) 取帧；相机以 **PIXFORMAT_JPEG** 直出
+用 [Esp32Camera::CaptureJpeg](https://github.com/3126872157/xiaoLamp-firmware/blob/codex/edge-runtime-research/main/boards/common/esp32_camera.cc) 取帧；相机以 **PIXFORMAT_JPEG** 直出
 （与硬件验证过的 `camera_test` 程序一致，OV2640 JPEG 模式稳定）。
 **本板已删除周期自动拍摄**（相机只在「拍照预览」/手动附图时按需拍照，不再后台周期采样）。
 
