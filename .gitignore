@@ -19,3 +19,6 @@ main/mmap_generate_emoji.h
 mmap_generate_*.h
 .clangd
 artifacts/lamp/
+
+# Local build/serial output may include host paths and device identifiers
+*.log
