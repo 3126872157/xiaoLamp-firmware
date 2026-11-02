@@ -1,4 +1,6 @@
-# Apple Lamp OV2640：外接功放 + PDM 麦克风定制板
+# Apple Lamp v1.0 · OV2640：外接功放 + PDM 麦克风定制板
+
+当前交付为main的v1.0（9206493 V1.0），使用xiaozhi-delivery角色；Omni/Edge角色仅作独立实验。
 
 与 `apple-lamp-ov3660` 并列的台灯开发板。SoC 仍为 ESP32-S3R8，16 MB Quad Flash，
 8 MB Octal PSRAM；相机换用 **OV2640**（200 万像素）；音频不再使用板载

@@ -1,6 +1,8 @@
-# Apple Lamp · 小智0.1交付候选
+# Apple Lamp · v1.0
 
-当前分支 `codex/xiaozhi-v0.1-delivery` 基于 `apple-lamp-v0.1`，新增增量示教和独立Flash动作库；跟书仍是不完善的实验功能，不能作为交付能力。构建角色 `xiaozhi-delivery`，局域网测试页8080。没有引入Edge Runtime；尚待实机验收。
+当前交付版本 **v1.0**，发布基线为 `9206493 V1.0`，从本仓库 `main` 获取；后续发布准备提交不改写该基线。运行路线是小智语音/MCP、本地动作规划与UART舵机执行器，包含增量示教、独立Flash动作库、灯光控制和局域网8080测试页。
+
+构建角色 `xiaozhi-delivery`，按实际硬件选择 OV2640 / OV3660 板型。跟书仍是不完善的实验功能，不作为 v1.0 交付能力。Edge Runtime/Omni 是独立实验路线；旧 `apple-lamp-v0.1` 标签和沿用旧名称的 `codex/xiaozhi-v0.1-delivery` 分支保留，不代表当前交付版本为0.1。以下上游小智说明描述其通用能力，不代表每项都已在台灯板型验收。
 
 - [OV2640 delivery 架构说明](docs/apple-lamp-ov2640-architecture.md)
 - [OV2640 delivery 使用说明](docs/apple-lamp-ov2640-user-guide.md)

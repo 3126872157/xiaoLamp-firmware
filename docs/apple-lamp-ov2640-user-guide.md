@@ -1,4 +1,4 @@
-# OV2640 delivery 使用说明
+# Apple Lamp v1.0 · OV2640 delivery 使用说明
 
 本文面向使用 `apple-lamp-ov2640-xiaozhi-delivery` 固件的操作者。当前版本是
 带 OV2640 摄像头、语音交互、局域网测试页和用户动作库的台灯机器人。源码中的跟书

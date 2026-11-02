@@ -1,8 +1,10 @@
-# 小智0.1交付分支：增量示教与 Flash 动作库
+# Apple Lamp v1.0：交付、增量示教与 Flash 动作库
+
+当前交付版本v1.0，发布基线`9206493 V1.0`，默认分支main；保留小智语音/MCP与本地执行链，跟书仍是实验功能。下文0.1标签、旧分支名称和2026-10-12实现记录用于追溯及回退说明，不代表当前版本号。
 
 基线：`apple-lamp-v0.1` / `3c3d52a6b9f2232f630ba47e3b969f69bfc9bd23`。分支：`codex/xiaozhi-v0.1-delivery`。
 
-这是小智路线的独立交付候选，不包含Edge Runtime/Omni实现，不改0.1标签，不修改小智后端。新角色 `xiaozhi-delivery`，板型身份 `apple-lamp-ov3660-xiaozhi-delivery`。0.1的 `local-twin` 保留。
+这是小智路线的v1.0交付实现，不包含Edge Runtime/Omni实现，不改0.1标签，不修改小智后端。新角色 `xiaozhi-delivery`，板型身份 `apple-lamp-ov3660-xiaozhi-delivery`。0.1的 `local-twin` 保留。
 
 同样的交付角色也已迁移到 OV2640 定制板，板型身份 `apple-lamp-ov2640-xiaozhi-delivery`
 （OV2640 专用 SCCB + 外接 I2S 功放 + 外接 PDM 麦，无 CH32V003/无 ES 编解码；交付逻辑与
