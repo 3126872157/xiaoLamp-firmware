@@ -127,21 +127,29 @@ python scripts/build_lamp_variant.py --board apple-lamp-ov2640 --role omni-poc
 
 ### edge-runtime 角色（10 个，含动作）
 
-| 技能                      | 参数                                                         | 作用                                                                     |
-| ------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| `lamp_get_state`          | 无                                                           | 查询机械臂缓存；`available` 才表示五轴反馈新鲜                           |
-| `lamp_end_conversation`   | 无                                                           | 广义告别/停止聊天；不坐下卸力                                            |
-| `lamp_rest`               | 无                                                           | 完整「去休息」：使能→坐下→卸力→成功后告别                                |
-| `lamp_set_mode`           | `mode`: sit/stand/work                                       | 明确站起/坐下/工作，保持 yaw                                             |
-| `lamp_stop`               | 无                                                           | 停止运动但保持支撑力矩                                                   |
-| `lamp_get_task`           | `task_id`                                                    | 查任务实际完成结果                                                       |
-| `lamp_set_torque`         | `enabled`: bool                                              | 明确使能/卸力                                                            |
-| `lamp_record_calibration` | `target_id`: user/book                                       | 手摆对准后记录标定                                                       |
-| `lamp_express`            | `skill_id` / `action` / `speak` / `repetitions` / `end_mode` | 说话伴随表达：A01 点头、B02 歪头、B01 摇头、A02 兴奋、A03 低头、A16 强调 |
-| `lamp_run_sequence`       | `steps`（1–16 步）、`enable_if_needed`                       | 执行动作或有限动作组                                                     |
+| 技能                      | 参数                                                                       | 作用                                                                                                   |
+| ------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `lamp_get_state`          | 无                                                                         | 查询机械臂缓存；`available` 才表示五轴反馈新鲜                                                         |
+| `lamp_end_conversation`   | 无                                                                         | 广义告别/停止聊天；不坐下卸力                                                                          |
+| `lamp_rest`               | 无                                                                         | 完整「去休息」：使能→坐下→卸力→成功后告别                                                              |
+| `lamp_set_mode`           | `mode`: sit/stand/work                                                     | 明确站起/坐下/工作，保持 yaw                                                                           |
+| `lamp_stop`               | 无                                                                         | 停止运动但保持支撑力矩                                                                                 |
+| `lamp_get_task`           | `task_id`                                                                  | 查任务实际完成结果                                                                                     |
+| `lamp_set_torque`         | `enabled`: bool                                                            | 明确使能/卸力                                                                                          |
+| `lamp_record_calibration` | `target_id`: user/book                                                     | 手摆对准后记录标定                                                                                     |
+| `lamp_express`            | `skill_id` / `action` / `speak` / `repetitions` / `end_mode` / `target_id` | 说话伴随表达：A01 点头、B02 歪头、B01 摇头、A02 兴奋、A03 低头、A16 强调、A09 注视、A11 转开、A14 后退 |
+| `lamp_run_sequence`       | `steps`（1–16 步）、`enable_if_needed`                                     | 执行动作或有限动作组                                                                                   |
 
-表达技能 `lamp_express` 的 `action` 别名：`nod`/`sway`/`shake_head`/`tilt`/`emphasize` 等，
-`repetitions` 仅对 A01 点头有效（默认 2，明确 3–5 次才设置）。
+表达技能 `lamp_express` 的 `action` 别名：`nod`/`sway`/`shake_head`/`tilt`/`emphasize`，以及
+`gaze`/`look_away`/`retreat`，`repetitions` 仅对 A01 点头有效（默认 2，明确 3–5 次才设置）。
+`A09`/`A11`/`A14` 必须带 `target_id`（user/book）且目标已标定。`A04` 是回坐姿的姿态变更，
+不是表情，不能当对话动作。
+
+对话动作的 cue 是一组可选动作而不是固定一个，避免每轮都点头：
+`agreement`=A01/A16、`question`=B02/A03、`denial`=B01/A14、`excitement`=A02/A01、
+`regret`=A03/B02、`emphasis`=A16/A01、`neutral`=A01/B02、`attention`=A09/B02、
+`avoidance`=A11/A14、`surprise`=A14/A02。同一轮里不能重复同一 `skill_id`（多次点头用
+`repetitions`），并且对话动作统一按 0.6 幅度播放，所以看起来比明确指令轻。
 
 ### 设备端本地 MCP 服务器（`self.lamp.*`，不归云端 Qwen 调用）
 
@@ -154,6 +162,11 @@ python scripts/build_lamp_variant.py --board apple-lamp-ov2640 --role omni-poc
 标定、未使能时先在实测位置使能。`list_primitives` 的 `cursor=0` 返回能力摘要页，列出每个
 step 动作的允许值（含 `set_mode` 的 `mode` 枚举），`cursor=1..13` 才是单个原语；姿态切换
 不是原语，A03/A04/A13 不能替代。
+
+带 `context` 的对话动作不会在工具返回时立刻动：执行器把它标成 `accepted`，等
+`Application` 进入 `kDeviceStateSpeaking` 后才提升为真正任务，8 秒内没有语音就取消。
+`get_state` 里的 `dialogue_pending`、`last_expression`、`expression_repeat_count` 用于排查
+「动作没出现」和「总是同一个动作」。连续重复只记录日志，不做固件拦截。
 
 这套走设备端 MCP 服务器路径（`local-*` / `local-twin` 角色与电脑桥），在 omni 协议里
 `SendMcpMessage` 是空实现，因此云端 Qwen 看不到 `self.lamp.*`。

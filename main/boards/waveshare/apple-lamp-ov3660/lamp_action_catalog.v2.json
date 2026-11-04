@@ -23,7 +23,7 @@
   },
   "completion": "completed/limited=硬件确认；accepted/running 不算",
   "enable": "显式姿态与表情在实测位置使能；示教、手动不使能",
-  "expression": "每轮至少 1 个表现(1-3 步或灯光)；有 cue 用 cue，无 cue 用 A01",
+  "expression": "每轮一个轻微动作并随内容变化；中性A01(repetitions:1)或B02",
   "limits": {
     "steps": 16,
     "total_duration_sec": 60,
@@ -132,7 +132,7 @@
       ],
       "target_required": false,
       "target_source": "mode_calibration",
-      "conversation_cue": null,
+      "conversation_cue": "neutral",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -150,7 +150,7 @@
       ],
       "target_required": true,
       "target_source": "mode_calibration",
-      "conversation_cue": null,
+      "conversation_cue": "attention",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -215,7 +215,7 @@
       ],
       "target_required": true,
       "target_source": "mode_calibration",
-      "conversation_cue": null,
+      "conversation_cue": "avoidance",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -271,7 +271,7 @@
       ],
       "target_required": true,
       "target_source": "mode_calibration",
-      "conversation_cue": null,
+      "conversation_cue": "surprise",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

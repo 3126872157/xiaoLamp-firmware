@@ -37,6 +37,15 @@ private:
     std::map<std::string, Record> records_;
     std::deque<std::string> order_;
     std::string queued_, active_;
+    // A host-tagged dialogue expression is accepted immediately but held here
+    // until the reply actually starts speaking, so the gesture lands with the
+    // voice. A staged body that never gets speech is cancelled, not played late.
+    std::string staged_, staged_id_;
+    int64_t staged_deadline_ = 0;
+    // Dialogue variety is only observed, never enforced: a repeated expression is
+    // logged so the host prompt can be corrected from real device evidence.
+    std::string last_expression_;
+    unsigned repeat_count_ = 0;
     std::atomic<uint32_t> epoch_{0};
     bool armed_ = false;
     bool manual_ = false;
@@ -77,6 +86,9 @@ private:
     bool StopMotors();
     void LoadStored();
     void CloseRestChat();
+    // Caller holds mutex_. Cancels a dialogue expression that is still waiting
+    // for speech; an operator takeover must not leave a stale gesture behind.
+    void DropStaged();
     bool live_ = false;
     uint32_t io_token_ = 0;
     bool ReadCancelled() const override { return io_token_ != epoch_.load(); }

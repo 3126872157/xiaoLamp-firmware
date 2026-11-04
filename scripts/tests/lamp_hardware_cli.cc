@@ -297,14 +297,49 @@ int main() {
         std::lock_guard l(bus_mutex);
         assert(writes[1] == 0 && writes[31] == 0);
     }
+    // A dialogue-tagged expression is accepted immediately but must not move the
+    // arm until the reply starts speaking; the harness drives that transition.
     Submit(
-        *e, "disarmed", "execute",
-        R"({"action_id":"execute_primitive","skill_id":"A01","context":{"source":"dialogue","turn_id":"boot-expression","cue":"agreement"}})");
-    assert(Wait(*e, "disarmed") == "failed");
+        *e, "dialogue-wait", "execute",
+        R"({"action_id":"execute_primitive","skill_id":"A01","context":{"source":"dialogue","turn_id":"turn-1","cue":"agreement"}})");
+    {
+        auto state = Json(e->State());
+        assert(cJSON_IsTrue(Item(state.get(), "busy")));
+        assert(cJSON_IsTrue(Item(state.get(), "dialogue_pending")));
+        std::lock_guard l(bus_mutex);
+        assert(writes[1] == 0 && writes[31] == 0);
+    }
+    // Only one expression per reply: a second turn waiting on the same speech is
+    // refused instead of silently queued behind it.
+    auto busy = Json(e->Submit(Command(
+        "dialogue-busy", "execute",
+        R"({"action_id":"execute_primitive","skill_id":"B02","context":{"source":"dialogue","turn_id":"turn-2","cue":"question"}})")));
+    assert(lamp::Text(Item(busy.get(), "error"), "code") == "BUSY");
+    lamp_test_device_state = kDeviceStateSpeaking;
+    assert(Wait(*e, "dialogue-wait") == "completed");
+    lamp_test_device_state = kDeviceStateIdle;
     {
         std::lock_guard l(bus_mutex);
-        assert(writes[31] == 0);
+        assert(writes[1] > 0);
     }
+    {
+        auto state = Json(e->State());
+        assert(cJSON_IsFalse(Item(state.get(), "dialogue_pending")));
+        assert(lamp::Text(state.get(), "last_expression") == "A01");
+        assert(cJSON_IsFalse(Item(state.get(), "busy")));
+    }
+    // A reply that never speaks must drop the gesture instead of landing late.
+    Submit(
+        *e, "dialogue-stale", "execute",
+        R"({"action_id":"execute_primitive","skill_id":"B01","context":{"source":"dialogue","turn_id":"turn-3","cue":"denial"}})");
+    assert(Wait(*e, "dialogue-stale") == "cancelled");
+    // An explicit request outranks a reaction still waiting for speech.
+    Submit(
+        *e, "dialogue-preempt", "execute",
+        R"({"action_id":"execute_primitive","skill_id":"A16","context":{"source":"dialogue","turn_id":"turn-4","cue":"emphasis"}})");
+    Submit(*e, "explicit", "execute", R"({"action_id":"execute_primitive","skill_id":"A01"})");
+    assert(Wait(*e, "explicit") == "completed");
+    assert(Wait(*e, "dialogue-preempt") == "cancelled");
     Submit(*e, "auto-stand", "execute", R"({"action_id":"set_mode","mode":"stand"})");
     assert(Wait(*e, "auto-stand") == "completed");
     assert(cJSON_IsTrue(Item(Json(e->State()).get(), "motion_enabled")));

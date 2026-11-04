@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <initializer_list>
 #include <set>
 #include <vector>
 
@@ -118,6 +119,19 @@ Result Step(const cJSON* step, const cJSON* catalog, bool finite_group) {
         return std::unexpected("Invalid target");
     return {};
 }
+// A cue names a small family of expressions, not one fixed action: a nod on
+// every turn is what makes a lamp look mechanical. `neutral` still asks for a
+// visible reaction, but the host may pick any expression that fits the sentence.
+struct CueFamily {
+    const char* cue;
+    std::initializer_list<const char*> skills;
+};
+const CueFamily kCueSkills[] = {
+    {"agreement", {"A01", "A16"}},  {"question", {"B02", "A03"}},  {"denial", {"B01", "A14"}},
+    {"excitement", {"A02", "A01"}}, {"regret", {"A03", "B02"}},    {"emphasis", {"A16", "A01"}},
+    {"neutral", {"A01", "B02"}},    {"attention", {"A09", "B02"}}, {"avoidance", {"A11", "A14"}},
+    {"surprise", {"A14", "A02"}},
+};
 Result Context(const cJSON* args, const cJSON* steps, bool group) {
     auto* context = cJSON_GetObjectItemCaseSensitive(args, "context");
     if (!context)
@@ -128,32 +142,34 @@ Result Context(const cJSON* args, const cJSON* steps, bool group) {
     if (Text(context, "source") != "dialogue" || !ValidId(turn))
         return std::unexpected("Invalid dialogue context");
     const auto cue = Text(context, "cue");
-    // `neutral` is the no-emotion fallback: the host still wants a visible
-    // reaction, so one A01 is the contract instead of silence.
-    const std::pair<const char*, const char*> cues[] = {
-        {"agreement", "A01"}, {"question", "B02"}, {"denial", "B01"}, {"excitement", "A02"},
-        {"regret", "A03"},    {"emphasis", "A16"}, {"neutral", "A01"}};
     if (cue.empty())
         return std::unexpected("Dialogue context needs a cue");
-    bool known = false;
-    for (const auto& [key, skill] : cues)
-        if (cue == key)
-            known = true;
-    if (!known)
+    const CueFamily* family = nullptr;
+    for (const auto& entry : kCueSkills)
+        if (cue == entry.cue)
+            family = &entry;
+    if (!family)
         return std::unexpected("Unknown dialogue cue");
     // One turn may carry a short expression sequence, but every step must be an
     // expression: a posture change or wait inside a dialogue turn is refused.
     const int steps_count = group ? cJSON_GetArraySize(steps) : 1;
     if (steps_count < 1 || steps_count > 3)
         return std::unexpected("Dialogue permits 1-3 expression steps per turn");
+    std::set<std::string> used;
     bool match = false;
     for (int i = 0; i < steps_count; i++) {
         const cJSON* step = group ? cJSON_GetArrayItem(steps, i) : args;
         if (Text(step, "action_id") != "execute_primitive")
             return std::unexpected("Dialogue permits expressions only");
-        for (const auto& [key, skill] : cues)
-            if (cue == key && Text(step, "skill_id") == skill)
-                match = true;
+        const auto skill = Text(step, "skill_id");
+        // A04 routes to the sit home pose: it is a posture change, not a mannerism.
+        if (skill == "A04")
+            return std::unexpected("A04 changes posture; use set_mode(sit) instead");
+        // Several nods are `repetitions`, not two A01 steps in one turn.
+        if (!used.insert(skill).second)
+            return std::unexpected("Dialogue repeats an expression; use repetitions");
+        if (std::find(family->skills.begin(), family->skills.end(), skill) != family->skills.end())
+            match = true;
         auto* options = cJSON_GetObjectItemCaseSensitive(step, "options");
         if (Text(options, "end_mode") == "hold_at_end")
             return std::unexpected("Dialogue expressions must return to reference");

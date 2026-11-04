@@ -224,3 +224,46 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 未做：`ESP_WIFI_STATIC_RX_BUFFER_NUM=3` 与 `RX_BA_WIN=3` 仍然偏低（IDF 在 PSRAM 模式下的默认是 10/16 与 16），但它们是既有配置、非本次回归；若第 2 项仍有残留，下一步再抬这两个值。OV3660 板需单独构建验证，配置共用同一个 `sdkconfig.defaults.esp32s3`。
 
 回滚方式：删除该行并重新构建；`sdkconfig` 会在下次 reconfigure 时回到动态 TX 缓冲。
+
+## 2026-11-04 变更：对话动作随语义变化并在语音开始时执行
+
+现象：无论说什么，台灯都在开口前机械地点一次头，情绪动作没有区分度。
+
+根因（三层叠加，都在代码里可查）：
+- 能力表 `expression` 策略写的是「每轮至少 1 个表现；有 cue 用 cue，无 cue 用 A01」，
+  `run_sequence` 描述又写「允许 A01 兜底」。
+- `Context()` 把 cue 映射成**唯一**一个 skill，并且 `neutral` 固定落到 A01。
+- 执行器在工具调用时立即执行，动作总是发生在 TTS 之前。
+
+改动（OV3660 与 OV2640 同步，`lamp_edge_runtime.cc` 仅 OV2640 有）：
+- `Context()` 的 cue 改成「动作族」：`agreement`=A01/A16、`question`=B02/A03、
+  `denial`=B01/A14、`excitement`=A02/A01、`regret`=A03/B02、`emphasis`=A16/A01、
+  `neutral`=A01/B02、`attention`=A09/B02、`avoidance`=A11/A14、`surprise`=A14/A02。
+  删除 `neutral→A01` 兜底；同一轮重复同一 `skill_id` 直接拒绝（提示用 `repetitions`）；
+  `A04` 会回 sit home，按姿态变更处理并在对话里拒绝。
+- `lamp_bridge.cc` 的 `run_sequence` 描述写入 cue 表、变化要求、`target_id` 要求和
+  「本地等语音开始后执行」，并去掉「A01 兜底」。
+- `lamp_pose_plan.cc`：对话动作统一按 `kDialogueIntensity = 0.6` 播放（幅度上限也参与
+  安全搜索上限，受限时只会更小）；明确指令仍是 1.0。
+- `lamp_hardware_executor.cc`：带 `context` 的 `execute`/`execute_group` 只登记为
+  `accepted`（`dialogue_pending`），由 `HardwareLoop()` 在 `kDeviceStateSpeaking` 时提升
+  为真实任务；8 秒没有语音则取消。多步动作之间插入 0.9 秒间隔；`last_expression` /
+  `expression_repeat_count` 记录连续重复（仅日志，不拦截）；显式动作可抢占还没开始播放的
+  对话动作；`BUSY` 只拦第二个对话动作。
+- `scripts/tests/fixtures/lamp_hardware_platform.h` 增加可设置的设备状态，
+  `lamp_hardware_cli.cc` 覆盖「等待语音 / 语音开始后执行 / 无语音取消 / 显式抢占」四种路径；
+  `test_lamp_protocol.py` 覆盖新 cue 族、`neutral` 不再固定 A01、重复 skill 与 A04 拒绝、
+  `A09/A11/A14` 的目标要求。
+- 新增 [`lamp_dialogue_prompt.md`](./lamp_dialogue_prompt.md)，给出可直接粘贴到小智后台的
+  角色提示词（每轮一个轻微动作、必须换动作、`turn_id` 唯一、不重试 BUSY）。
+
+验证：`sync_lamp_catalog.py --check` 双板通过；OV2640 delivery `idf.py build` 成功
+（`xiaozhi.bin` 0x2b9f70 / 2,858,864 B，无 warning），归档
+`artifacts/lamp/xiaozhi-delivery/d0a8935e-8a8f82013593/`；
+`lamp_protocol.cc`、`lamp_pose_plan.cc`、`lamp_hardware_executor.cc`、`lamp_bridge.cc`
+（两板）交叉编译语法检查通过。
+
+未验证：本机无主机 C++ 编译器，`test_lamp_protocol.py` / `lamp_hardware_cli.cc` 未实际运行；
+语音起点与 TTS 的实际同步、0.6 幅度是否够「轻微」、0.9 秒间隔是否合适、以及新 cue 族是否
+真的让模型换动作，都必须在真机复测。OV3660 未重新构建。
+

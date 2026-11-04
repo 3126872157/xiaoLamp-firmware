@@ -18,6 +18,9 @@ namespace {
 const cJSON* Item(const cJSON* o, const char* key) {
     return cJSON_GetObjectItemCaseSensitive(o, key);
 }
+// Pause between expressions inside one spoken turn: long enough that two beats
+// read as two gestures, short enough not to outlast a short reply.
+constexpr unsigned kDialogueGapMs = 900;
 // Local preset values are the only numeric bounds the model may not change.
 double Preset(const cJSON* configuration, const char* skill, const char* field, double fallback) {
     const auto* value = Item(Item(Item(configuration, "action_presets"), skill), field);
@@ -401,6 +404,7 @@ std::string LampHardwareExecutor::PanelSubmit(const std::string& body) {
             return Error("BUSY", "Wait for task completion or stop first");
         if (teaching_owned_)
             return Error("TEACHING_ACTIVE", "End teaching before changing control ownership");
+        DropStaged();
         manual_ = op == "acquire";
         armed_ = false;
         rest_at_ = 0;
@@ -437,8 +441,10 @@ std::string LampHardwareExecutor::InstallationBinding() {
 void LampHardwareExecutor::SetTeachingOwned(bool enabled) {
     std::lock_guard lock(mutex_);
     teaching_owned_ = enabled;
-    if (enabled)
+    if (enabled) {
         manual_ = true;
+        DropStaged();
+    }
     armed_ = false;
     rest_at_ = 0;
 }
@@ -591,18 +597,36 @@ std::string LampHardwareExecutor::SubmitChecked(const std::string& body, bool pa
         return Error("NO_MANUAL_CONTROL", "Acquire manual control first");
     const bool preempt = op == "cancel" || op == "rest" ||
                          (op == "set_torque" && cJSON_IsFalse(Item(args, "enabled")));
+    // A host-tagged dialogue expression is accepted but held until the reply
+    // starts speaking, so a gesture lands with the voice instead of before it.
+    const auto* context = Item(args, "context");
+    const bool dialogue = context && !panel && (op == "execute" || op == "execute_group");
+    auto drop_queued = [&] {
+        if (queued_.empty())
+            return;
+        CJsonUniquePtr pending(cJSON_Parse(queued_.c_str()));
+        auto& old = records_.at(lamp::Text(pending.get(), "request_id"));
+        old.status = "cancelled";
+        old.reason = "Preempted before execution";
+        queued_.clear();
+    };
     if (preempt && op == "cancel") {
         const auto target = lamp::Text(args, "task_id");
-        if (!target.empty() && target != "hardware-" + active_ &&
-            (queued_.empty() ||
-             target != "hardware-" + lamp::Text(CJsonUniquePtr(cJSON_Parse(queued_.c_str())).get(),
-                                                "request_id")))
+        auto matches = [&](const std::string& pending_body) {
+            if (target.empty() || pending_body.empty())
+                return false;
+            CJsonUniquePtr pending(cJSON_Parse(pending_body.c_str()));
+            return target == "hardware-" + lamp::Text(pending.get(), "request_id");
+        };
+        if (!target.empty() && target != "hardware-" + active_ && !matches(queued_) &&
+            !matches(staged_))
             return Error("TASK_NOT_ACTIVE", "Cancellation target is not active");
     }
-    if ((!queued_.empty() || !active_.empty()) && !preempt)
-        return Error("BUSY", "Hardware task in progress; do not retry dialogue");
-    const auto* context = Item(args, "context");
-    if (context) {
+    if ((!queued_.empty() || !active_.empty() || (dialogue && !staged_.empty())) && !preempt)
+        return Error("BUSY", dialogue ? "A dialogue expression is already waiting for speech; "
+                                        "do not retry"
+                                      : "Hardware task in progress; do not retry dialogue");
+    if (dialogue) {
         const auto turn = lamp::Text(context, "turn_id");
         // Only the turn id is deduplicated. A fixed cooldown would contradict the
         // requirement that every spoken reply carries a visible reaction; back-to-back
@@ -617,13 +641,13 @@ std::string LampHardwareExecutor::SubmitChecked(const std::string& body, bool pa
             turns_.erase(turns_.begin());
         turns_.insert(turn);
         dialogue_at_ = esp_timer_get_time();
+    } else if (!preempt && !staged_.empty()) {
+        // An explicit request outranks a reaction that is still waiting for speech.
+        DropStaged();
     }
-    if (preempt && !queued_.empty()) {
-        CJsonUniquePtr pending(cJSON_Parse(queued_.c_str()));
-        auto& old = records_.at(lamp::Text(pending.get(), "request_id"));
-        old.status = "cancelled";
-        old.reason = "Preempted before execution";
-        queued_.clear();
+    if (preempt) {
+        drop_queued();
+        DropStaged();
     }
     ++epoch_;
     rest_at_ = 0;
@@ -633,9 +657,17 @@ std::string LampHardwareExecutor::SubmitChecked(const std::string& body, bool pa
         records_.erase(order_.front());
         order_.pop_front();
     }
-    records_[id] = {sig, op, "accepted", "Awaiting local worker"};
-    order_.push_back(id);
-    queued_ = body;
+    if (dialogue) {
+        records_[id] = {sig, op, "accepted", "Awaiting speech onset"};
+        order_.push_back(id);
+        staged_ = body;
+        staged_id_ = id;
+        staged_deadline_ = esp_timer_get_time() + 8000000;
+    } else {
+        records_[id] = {sig, op, "accepted", "Awaiting local worker"};
+        order_.push_back(id);
+        queued_ = body;
+    }
     RecordDiagnostic("task", id, Receipt(id, records_[id]));
     return Receipt(id, records_[id]);
 }
@@ -657,7 +689,14 @@ std::string LampHardwareExecutor::State() {
                                            cJSON_CreateString("local_player"));
     cJSON_ReplaceItemInObjectCaseSensitive(o.get(), "motion_enabled", cJSON_CreateBool(armed_));
     cJSON_AddStringToObject(o.get(), "mode", Modes[mode_]);
-    cJSON_AddBoolToObject(o.get(), "busy", !active_.empty() || !queued_.empty());
+    cJSON_AddBoolToObject(o.get(), "busy",
+                          !active_.empty() || !queued_.empty() || !staged_.empty());
+    // A staged dialogue expression is accepted but has not moved yet. Dialogue
+    // variety is reported, not enforced: the host prompt owns that policy.
+    cJSON_AddBoolToObject(o.get(), "dialogue_pending", !staged_.empty());
+    if (!last_expression_.empty())
+        cJSON_AddStringToObject(o.get(), "last_expression", last_expression_.c_str());
+    cJSON_AddNumberToObject(o.get(), "expression_repeat_count", repeat_count_);
     cJSON_AddBoolToObject(o.get(), "requires_operator_enable", !armed_);
     cJSON_AddBoolToObject(o.get(), "explicit_motion_can_enable", !manual_ && !teaching_owned_);
     const bool light = lamp::light::Available();
@@ -981,6 +1020,17 @@ void LampHardwareExecutor::Finish(const std::string& id, const std::string& stat
     active_.clear();
     RecordDiagnostic("task", id, Receipt(id, r));
 }
+void LampHardwareExecutor::DropStaged() {
+    if (staged_.empty())
+        return;
+    CJsonUniquePtr pending(cJSON_Parse(staged_.c_str()));
+    auto& record = records_.at(lamp::Text(pending.get(), "request_id"));
+    record.status = "cancelled";
+    record.reason = "Preempted before execution";
+    staged_.clear();
+    staged_id_.clear();
+    staged_deadline_ = 0;
+}
 bool LampHardwareExecutor::RecordCalibration(const std::string& target, uint32_t token) {
     lamp::pose::Pose q;
     if (!Positions(q) || epoch_ != token)
@@ -1299,6 +1349,8 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
     // One optional dimmer track per plan; a step without a track leaves the lamp alone.
     std::vector<std::optional<LightCue>> tracks;
     std::vector<bool> latching;
+    std::vector<std::string> skills;
+    const bool dialogue = Item(args, "context") != nullptr;
     int mode;
     {
         std::lock_guard lock(mutex_);
@@ -1311,8 +1363,7 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
         CJsonUniquePtr semantic(cJSON_Duplicate(s, true));
         cJSON_DeleteItemFromObjectCaseSensitive(semantic.get(), "context");
         const auto skill = lamp::Text(semantic.get(), "skill_id");
-        auto plan = lamp::pose::Build(*configuration_, mode, current, semantic.get(),
-                                      Item(args, "context") != nullptr);
+        auto plan = lamp::pose::Build(*configuration_, mode, current, semantic.get(), dialogue);
         const bool dimmer = plan.requires_light && lamp::light::Available();
         if (plan.requires_light && !dimmer) {
             // A16 without a dimmer is still a body emphasis; A10 is a lighting action.
@@ -1382,6 +1433,7 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
         limited |= plan.limited;
         latching.push_back(cue.has_value() && latch);
         tracks.push_back(cue);
+        skills.push_back(skill);
         plans.push_back(std::move(motion));
     }
     {
@@ -1409,6 +1461,23 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
             mode_ = plans[i].mode_after;
             records_.at(id).step = i + 1;
         }
+        // Spread a spoken multi-step expression out so it reads as separate beats
+        // of the reply instead of one continuous mechanical wave.
+        if (dialogue && i + 1 < plans.size())
+            vTaskDelay(pdMS_TO_TICKS(kDialogueGapMs));
+    }
+    if (dialogue && !skills.empty()) {
+        unsigned repeats;
+        {
+            std::lock_guard lock(mutex_);
+            repeat_count_ = skills.front() == last_expression_ ? repeat_count_ + 1 : 1;
+            last_expression_ = skills.front();
+            repeats = repeat_count_;
+        }
+        // Variety is the host prompt's job. The device only records the evidence.
+        if (repeats >= 3)
+            ESP_LOGW("LampHW", "Dialogue expression %s repeated %u turns; vary the cue action",
+                     skills.front().c_str(), repeats);
     }
     if (op == "rest") {
         if (limited || !Torque(false, token)) {
@@ -1459,9 +1528,27 @@ void LampHardwareExecutor::HardwareLoop() {
     unsigned telemetry = 0;
     while (true) {
         std::string body;
+        std::string expired;
         uint32_t token;
+        const bool speaking = Application::GetInstance().GetDeviceState() == kDeviceStateSpeaking;
         {
             std::lock_guard lock(mutex_);
+            // A dialogue expression waits for the reply to start speaking. Holding
+            // it here, instead of playing at tool-call time, is what makes the
+            // motion land with the voice rather than before it.
+            if (!staged_.empty()) {
+                if (speaking) {
+                    queued_ = std::move(staged_);
+                    staged_.clear();
+                    staged_id_.clear();
+                    staged_deadline_ = 0;
+                } else if (esp_timer_get_time() > staged_deadline_) {
+                    expired = std::move(staged_id_);
+                    staged_.clear();
+                    staged_id_.clear();
+                    staged_deadline_ = 0;
+                }
+            }
             body = std::move(queued_);
             queued_.clear();
             token = epoch_;
@@ -1470,6 +1557,12 @@ void LampHardwareExecutor::HardwareLoop() {
                 CJsonUniquePtr root(cJSON_Parse(body.c_str()));
                 active_ = lamp::Text(root.get(), "request_id");
             }
+        }
+        if (!expired.empty()) {
+            // A stale gesture that lands after the reply is worse than none.
+            ESP_LOGW("LampHW", "Dialogue expression %s cancelled: speech never started",
+                     expired.c_str());
+            Finish(expired, "cancelled", "TTS speech did not start; expression skipped");
         }
         if (!body.empty()) {
             Execute(body, token);

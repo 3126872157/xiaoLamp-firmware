@@ -89,9 +89,15 @@ sequence_json 可携带 context：
 }
 ```
 
-按 `lamp_dialogue_mcp_instructions.md` 配置官方角色：赞同A01、询问B02、否定B01、兴奋A02、
-遗憾A03、强调A16；每轮最多一个，通常省略options，自动表达返回参考体态。
-BUSY、DIALOGUE_COOLDOWN、DIALOGUE_ALREADY_EXPRESSED 是跳过，不能换ID循环重试。
+按 [`lamp_dialogue_prompt.md`](./lamp_dialogue_prompt.md) 配置官方角色。每个 cue 现在是一组
+可选动作而不是固定一个，这样模型不必每轮都点头：
+`agreement`=A01/A16、`question`=B02/A03、`denial`=B01/A14、`excitement`=A02/A01、
+`regret`=A03/B02、`emphasis`=A16/A01、`neutral`=A01/B02、`attention`=A09/B02、
+`avoidance`=A11/A14、`surprise`=A14/A02。
+每轮最多 1–3 步，同一轮不能重复同一 `skill_id`（多次点头用 `repetitions`），
+`A09`/`A11`/`A14` 必须带 `target_id` 且目标已标定。`A04` 会回到 sit home，是姿态变更，
+不是表情，对话里直接拒绝。
+BUSY、DIALOGUE_SKIPPED 是跳过，不能换ID循环重试。
 明确用户动作请求不附加 dialogue context。
 
 本版透传并校验提供的 context，网页执行轮次去重和2.5秒冷却；没有官方后端真实 assistant
@@ -182,7 +188,8 @@ MCP 标定要求卸力且 idle，记录完整回读姿态，浏览器 localStora
 
 工具描述增加更热情的自主表达、点一次／点两下均一次 A01 调用（默认两次）、
 明确3–5次才使用 repetitions；仍一轮最多一次、冷却、busy跳过、卸力禁动。
-云端角色设定可采用根项目 research/lamp_dialogue_mcp_instructions.md，未自动修改云端设定。
+云端角色设定可采用 [`lamp_dialogue_prompt.md`](./lamp_dialogue_prompt.md) 的可粘贴片段，未自动
+修改云端设定。固件不做自动补动作，也不会猜对话意图。
 
 验证：11项生产协议测试通过，Web 123项与HTTP中继6项通过；C++→HTTP→真实浏览器集成
 覆盖手掰UI、持久化标定、卸力拦截、使能不跳、坐下才卸力；板型编译通过，app 0x26ffd0，

@@ -607,12 +607,17 @@ void RegisterLampTools(LampActionExecutor& executor) {
         });
     mcp.AddTool(
         "self.lamp.run_sequence",
-        "提交有限语义组（1-16 步，≤60 秒）。分工：姿态用 set_mode，单个表情用 execute_action，"
-        "多步组合或说话配动作才用这里。说话配动作时带 "
-        "context:{source:'dialogue',turn_id:'本轮唯一',cue:'agreement|question|denial|excitement|"
-        "regret|emphasis'}，"
-        "一轮至少一个表现、至多三步，允许 A01 兜底。忙或冷却时跳过，不要换 id 重试。"
-        "回执不等于到位，用 get_state 查。",
+        "提交有限语义组（1-16 步，≤60 秒）。姿态用 set_mode，单个表情用 execute_action，"
+        "多步组合或说话配动作才用这里。说话配动作带 "
+        "context:{source:'dialogue',turn_id:'本轮唯一',cue}，cue 取 "
+        "agreement/question/denial/excitement/regret/emphasis/neutral/attention/avoidance/"
+        "surprise。每轮只做一个轻微表情并随语义变化，不要每轮都点头；cue→动作："
+        "agreement A01|A16，question B02|A03，denial B01|A14，excitement A02|A01，"
+        "regret A03|B02，emphasis A16|A01，neutral A01(repetitions:1)|B02，"
+        "attention A09|B02，avoidance A11|A14，surprise A14|A02。至多三步，同一轮不重复同一 "
+        "skill；A09/A11/A14 必须带 target_id 且已标定。带 context 时本地等语音开始后再执行，"
+        "多步自动错开。BUSY 或 DIALOGUE_SKIPPED 直接跳过，不要换 id 重试。回执不等于到位，用 "
+        "get_state 查。",
         PropertyList(
             {Property("sequence_json", kPropertyTypeString).SetMaxLength(lamp::kMaxCommandBytes)}),
         [&executor](const PropertyList& args) -> ReturnValue {
@@ -679,7 +684,8 @@ void RegisterLampTools(LampActionExecutor& executor) {
         "operation:'execute',args:{action_id:'execute_primitive',skill_id:'A01'..'B02',"
         "target_id?:'user'|'book',options?:{...}}}。skill_id 只能用 list_primitives 里真实存在的"
         "13 个；需要目标的原语必须带 target_id；所有选项放在 options 内，不能放顶层。"
-        "A10 的 options.hold_mode=holding 只作单条执行，结束用 end_lighting。回执不等于到位。",
+        "A10 的 options.hold_mode=holding 只作单条执行，结束用 end_lighting。用户明确要求做动作时"
+        "不要带 dialogue context。回执不等于到位。",
         PropertyList(
             {Property("action_json", kPropertyTypeString).SetMaxLength(lamp::kMaxCommandBytes)}),
         [&executor](const PropertyList& args) -> ReturnValue {

@@ -46,7 +46,8 @@ bool Emergency(const std::string& name, const std::string& args) {
             cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(j.get(), "enabled")));
 }
 std::string Operation(const std::string& name) {
-    if (name == "lamp_run_sequence" || name == "lamp_set_mode" || name == "lamp_prepare_expression")
+    if (name == "lamp_run_sequence" || name == "lamp_set_mode" || name == "lamp_express" ||
+        name == "lamp_prepare_expression")
         return "execute_group";
     if (name == "lamp_stop")
         return "cancel";
@@ -123,7 +124,8 @@ void LampEdgeRuntime::Process(Work* work) {
         Complete(work, Error("Unknown tool/invalid args; runtime owns context"));
         return;
     }
-    const bool prepare_expression = work->name == "lamp_prepare_expression";
+    const bool prepare_expression =
+        work->name == "lamp_express" || work->name == "lamp_prepare_expression";
     bool silent_expression = false;
     if (prepare_expression) {
         auto skill = lamp::Text(args.get(), "skill_id");
@@ -139,6 +141,12 @@ void LampEdgeRuntime::Process(Work* work) {
                 skill = "A02";
             else if (name == "低头" || name == "lower_head")
                 skill = "A03";
+            else if (name == "注视" || name == "gaze")
+                skill = "A09";
+            else if (name == "转开" || name == "look_away")
+                skill = "A11";
+            else if (name == "后退" || name == "retreat")
+                skill = "A14";
             else if (name == "摇头" || name == "shake_head")
                 skill = "B01";
             else if (name == "好奇歪头" || name == "tilt")
@@ -165,8 +173,11 @@ void LampEdgeRuntime::Process(Work* work) {
             }
             silent_expression = cJSON_IsFalse(speak);
         }
-        if (skill != "A01" && skill != "A02" && skill != "A03" && skill != "B01" &&
-            skill != "B02" && skill != "A16") {
+        // A09/A11/A14 aim at a calibrated face or book; the rest are body-only.
+        const bool needs_target = skill == "A09" || skill == "A11" || skill == "A14";
+        if (skill != "A01" && skill != "A02" && skill != "A03" && skill != "A09" &&
+            skill != "A11" && skill != "A14" && skill != "B01" && skill != "B02" &&
+            skill != "A16") {
             Complete(work, Error("Unsupported expression skill"));
             return;
         }
@@ -182,6 +193,7 @@ void LampEdgeRuntime::Process(Work* work) {
                 std::string(field->string) != "end_mode" &&
                 std::string(field->string) != "speech" && std::string(field->string) != "speak" &&
                 std::string(field->string) != "action" &&
+                std::string(field->string) != "target_id" &&
                 std::string(field->string) != "repetitions") {
                 Complete(work, Error("Expression accepts action or skill_id, speech and end_mode"));
                 return;
@@ -192,14 +204,27 @@ void LampEdgeRuntime::Process(Work* work) {
             Complete(work, Error("Invalid expression end_mode"));
             return;
         }
-        args = Parse("{\"steps\":[{\"action_id\":\"execute_primitive\",\"skill_id\":\"" + skill +
-                     "\",\"options\":{\"end_mode\":\"" +
-                     (end.empty() ? "return_to_reference" : end) + "\"}}]}");
+        const auto target = lamp::Text(args.get(), "target_id");
+        if (needs_target != !target.empty() ||
+            (needs_target && target != "user" && target != "book")) {
+            Complete(work, Error(needs_target ? "This expression requires target_id user/book"
+                                              : "target_id is only valid for A09/A11/A14"));
+            return;
+        }
+        Json steps(cJSON_CreateArray(), cJSON_Delete);
+        auto* built = cJSON_CreateObject();
+        cJSON_AddStringToObject(built, "action_id", "execute_primitive");
+        cJSON_AddStringToObject(built, "skill_id", skill.c_str());
+        if (needs_target)
+            cJSON_AddStringToObject(built, "target_id", target.c_str());
+        auto* options = cJSON_AddObjectToObject(built, "options");
+        cJSON_AddStringToObject(options, "end_mode",
+                                end.empty() ? "return_to_reference" : end.c_str());
         if (repetitions)
-            cJSON_AddNumberToObject(
-                cJSON_GetObjectItem(cJSON_GetArrayItem(cJSON_GetObjectItem(args.get(), "steps"), 0),
-                                    "options"),
-                "repetitions", repetitions);
+            cJSON_AddNumberToObject(options, "repetitions", repetitions);
+        cJSON_AddItemToArray(steps.get(), built);
+        args = Json(cJSON_CreateObject(), cJSON_Delete);
+        cJSON_AddItemToObject(args.get(), "steps", steps.release());
     }
     bool auto_enable = work->name == "lamp_set_mode" || work->name == "lamp_rest";
     if (auto* flag = cJSON_GetObjectItemCaseSensitive(args.get(), "enable_if_needed")) {
@@ -485,14 +510,13 @@ std::string LampEdgeRuntime::Tools() {
         cJSON_Parse(
             R"({"type":"object","additionalProperties":false,"properties":{"target_id":{"type":"string","enum":["user","book"]}},"required":["target_id"]})"));
     add("lamp_express",
-        "纯动作传speak:false与action或skill_"
-        "id，立即执行且成功不说话；默认伴随说话的表达：先调用预备，再自然回答；实际播放开始后本地释"
-        "放动作。不等待运动完成，不用于"
-        "单独站起/坐下/工作。开心/"
-        "兴奋A02，好奇B02，同意A01，否定B01，低落A03，强调A16。无需目标或标定，必须已使能，不自动上"
-        "力。每轮最多一次。",
+        "说话配动作：每轮一个轻微表情并随语义变化，不要每轮都点头。同意A01、兴奋A02、低落A03、"
+        "注视A09、转开A11、后退A14、否认B01、好奇B02、强调A16；A04 是回坐姿的姿态变更，不是表情。"
+        "A09/A11/A14 必须带 target_id 且已标定。纯动作传 speak:false，立即执行且不回复；"
+        "默认伴随说话，先预备再自然回答，播放开始后本地释放动作，不等待运动完成。"
+        "不用于单独站起/坐下/工作。必须已使能，不自动上力；每轮最多一次。",
         cJSON_Parse(
-            R"({"type":"object","additionalProperties":false,"properties":{"skill_id":{"type":"string","enum":["A01","A02","A03","B01","B02","A16"]},"action":{"type":"string","enum":["点头","兴奋摆动","低头","摇头","好奇歪头","强调","nod","sway","lower_head","shake_head","tilt","emphasize"]},"speak":{"type":"boolean","description":"false只做动作不回复；true或省略伴随说话"},"repetitions":{"type":"integer","minimum":1,"maximum":5,"description":"仅A01点头；一次或两下保持默认2，明确三/四/五次才设置。不拆成多次调用。"},"end_mode":{"type":"string","enum":["return_to_reference","hold_at_end"]}},"oneOf":[{"required":["skill_id"]},{"required":["action"]}]})"));
+            R"({"type":"object","additionalProperties":false,"properties":{"skill_id":{"type":"string","enum":["A01","A02","A03","A09","A11","A14","B01","B02","A16"]},"action":{"type":"string","enum":["点头","兴奋摆动","低头","注视","转开","后退","摇头","好奇歪头","强调","nod","sway","lower_head","gaze","look_away","retreat","shake_head","tilt","emphasize"]},"target_id":{"type":"string","enum":["user","book"],"description":"仅A09/A11/A14需要；目标必须已标定"},"speak":{"type":"boolean","description":"false只做动作不回复；true或省略伴随说话"},"repetitions":{"type":"integer","minimum":1,"maximum":5,"description":"仅A01点头；一次或两下保持默认2，明确三/四/五次才设置。不拆成多次调用。"},"end_mode":{"type":"string","enum":["return_to_reference","hold_at_end"]}},"oneOf":[{"required":["skill_id"]},{"required":["action"]}]})"));
     auto schema = Json(object(), cJSON_Delete);
     auto* steps = cJSON_CreateObject();
     cJSON_AddStringToObject(steps, "type", "array");

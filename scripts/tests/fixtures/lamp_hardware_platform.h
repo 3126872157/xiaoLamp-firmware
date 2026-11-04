@@ -103,7 +103,10 @@ int ledc_channel_config(const ledc_channel_config_t*);
 int ledc_set_duty(ledc_mode_t, ledc_channel_t, uint32_t);
 int ledc_update_duty(ledc_mode_t, ledc_channel_t);
 int ledc_stop(ledc_mode_t, ledc_channel_t, uint32_t);
-constexpr int kDeviceStateIdle = 0, kDeviceStateListening = 1;
+constexpr int kDeviceStateIdle = 0, kDeviceStateListening = 1, kDeviceStateSpeaking = 2;
+// The harness drives idle/speaking so the staged dialogue path can be exercised
+// without a real audio pipeline.
+inline int lamp_test_device_state = kDeviceStateIdle;
 class Application {
 public:
     static Application& GetInstance();
@@ -111,7 +114,7 @@ public:
     void Schedule(F f) {
         f();
     }
-    int GetDeviceState() { return kDeviceStateIdle; }
+    int GetDeviceState() { return lamp_test_device_state; }
     bool IsVoiceDetected() { return false; }
     void ToggleChatState() {}
 };

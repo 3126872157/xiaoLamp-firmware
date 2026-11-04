@@ -135,10 +135,10 @@ class LampProtocolTests(unittest.TestCase):
         self.run_adapter(self.sequence([{"action_id": "execute_primitive", "skill_id": "A01"},
                                         {"action_id": "execute_primitive", "skill_id": "B02"},
                                         {"action_id": "execute_primitive", "skill_id": "B01"}], context=context))
-        # `neutral` is the no-emotion fallback and must resolve to A01.
+        # `neutral` no longer forces A01: the reply may pick any expression that fits.
         neutral = {"source": "dialogue", "turn_id": "turn-43", "cue": "neutral"}
         self.run_adapter(self.sequence([{"action_id": "execute_primitive", "skill_id": "A01"}], context=neutral))
-        self.run_adapter(self.sequence([{"action_id": "execute_primitive", "skill_id": "B02"}], context=neutral), valid=False)
+        self.run_adapter(self.sequence([{"action_id": "execute_primitive", "skill_id": "B02"}], context=neutral))
         for steps in [
             # A cue that matches no step in the turn.
             [{"action_id": "execute_primitive", "skill_id": "A01"}],
@@ -147,9 +147,32 @@ class LampProtocolTests(unittest.TestCase):
             [{"action_id": "execute_primitive", "skill_id": "B02", "options": {"end_mode": "hold_at_end"}}],
             # A posture change is not an expression.
             [{"action_id": "set_mode", "mode": "stand"}],
+            # A04 routes to the sit home pose, so it is a posture change too.
+            [{"action_id": "execute_primitive", "skill_id": "A04"}],
+            # Two nods are `repetitions`, not two A01 steps in one turn.
+            [{"action_id": "execute_primitive", "skill_id": "B02"},
+             {"action_id": "execute_primitive", "skill_id": "B02"}],
         ]: self.run_adapter(self.sequence(steps, context=context), valid=False)
         self.run_adapter(self.sequence([{"action_id": "execute_primitive", "skill_id": "A01"}],
                                        context={"source": "dialogue", "turn_id": "turn-44", "cue": "angry"}), valid=False)
+
+    def test_dialogue_cue_families_allow_variety(self):
+        # Each cue offers more than one expression, so a reply can vary instead of
+        # nodding on every turn; target-required skills still need a target.
+        for cue, skill, target in [("agreement", "A16", None), ("question", "A03", None),
+                                   ("denial", "A14", "user"), ("excitement", "A01", None),
+                                   ("regret", "B02", None), ("emphasis", "A01", None),
+                                   ("neutral", "B02", None), ("attention", "A09", "user"),
+                                   ("avoidance", "A11", "book"), ("surprise", "A02", None)]:
+            step = {"action_id": "execute_primitive", "skill_id": skill}
+            if target:
+                step["target_id"] = target
+            with self.subTest(cue=cue):
+                self.run_adapter(self.sequence([step], context={"source": "dialogue", "turn_id": "v-" + cue, "cue": cue}))
+        # A09/A11/A14 need a calibrated target even inside their cue family.
+        self.run_adapter(self.sequence([{"action_id": "execute_primitive", "skill_id": "A09"}],
+                                       context={"source": "dialogue", "turn_id": "turn-46", "cue": "attention"}),
+                         valid=False)
 
     def test_persistent_lighting_requires_single_execute(self):
         step = {"action_id": "execute_primitive", "skill_id": "A10", "target_id": "book", "options": {"hold_mode": "holding"}}
