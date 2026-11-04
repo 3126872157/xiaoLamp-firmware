@@ -565,8 +565,12 @@ std::string LampHardwareExecutor::SubmitChecked(const std::string& body, bool pa
         // Only the turn id is deduplicated. A fixed cooldown would contradict the
         // requirement that every spoken reply carries a visible reaction; back-to-back
         // turns are ordered by the BUSY check instead.
-        if (turns_.contains(turn))
+        if (turns_.contains(turn)) {
+            // A host that reuses one turn id would silently lose every later
+            // expression, so the refusal has to be visible in the device log.
+            ESP_LOGW("LampHW", "Dialogue skipped: turn_id '%s' already used", turn.c_str());
             return Error("DIALOGUE_SKIPPED", "Turn already used");
+        }
         if (turns_.size() >= 64)
             turns_.erase(turns_.begin());
         turns_.insert(turn);

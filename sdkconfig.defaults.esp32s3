@@ -9,6 +9,14 @@ CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=102400
 CONFIG_SPIRAM_MEMTEST=n
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+# Let WiFi and lwIP buffers come from PSRAM instead of internal SRAM. Without
+# this, every audio frame must be copied into a WiFi TX buffer carved out of the
+# internal heap; under camera/LVGL load that allocation fails and the uplink
+# dies with `EspUdp: Send failed: ret=-1, errno=12` (ENOMEM from
+# low_level_output -> ESP_ERR_NO_MEM -> ERR_MEM). Enabling it also forces the
+# static TX buffer type, whose 32-deep cache queue converts that hard failure
+# into queueing.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=3
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=6

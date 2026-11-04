@@ -13,6 +13,14 @@
 
 #define TAG "MQTT"
 
+namespace {
+// A 60 ms opus frame means ~16 sends per second, so 60 consecutive failures is
+// roughly four seconds of a dead uplink: long enough to ride out a hiccup, short
+// enough to recover instead of staying silent for the rest of the session.
+constexpr int kUdpFailureThreshold = 60;
+constexpr int kUdpFailureLogInterval = 30;
+}  // namespace
+
 MqttProtocol::MqttProtocol() {
     event_group_handle_ = xEventGroupCreate();
 
@@ -213,11 +221,11 @@ bool MqttProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     {
         std::lock_guard<std::mutex> lock(channel_mutex_);
         if (udp_ == nullptr) {
+            udp_send_failures_ = 0;
             return false;
         }
         if (aes_nonce_.size() != kAudioHeaderSize || packet->payload.size() > UINT16_MAX) {
-            ESP_LOGE(TAG, "Invalid AES nonce or audio payload length: %zu",
-                     packet->payload.size());
+            ESP_LOGE(TAG, "Invalid AES nonce or audio payload length: %zu", packet->payload.size());
             return false;
         }
         udp = udp_;
@@ -243,7 +251,26 @@ bool MqttProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     }
 
     // Send without holding channel_mutex_ (see above).
-    return udp->Send(encrypted) > 0;
+    if (udp->Send(encrypted) > 0) {
+        if (udp_send_failures_ > 0)
+            ESP_LOGW(TAG, "Audio uplink recovered after %d failed sends", udp_send_failures_);
+        udp_send_failures_ = 0;
+        return true;
+    }
+
+    // lwIP reports ENOMEM when the WiFi TX queue or the lwIP heap refuses the
+    // datagram, which happens once the link is congested or the AP is gone.
+    // Retrying at frame rate would flood the log and never recover, so count the
+    // failures, log them sparsely, and end the session when the uplink is dead.
+    udp_send_failures_++;
+    if (udp_send_failures_ == 1 || udp_send_failures_ % kUdpFailureLogInterval == 0)
+        ESP_LOGW(TAG, "Audio uplink send failed %d times in a row", udp_send_failures_);
+    if (udp_send_failures_ == kUdpFailureThreshold) {
+        ESP_LOGE(TAG, "Audio uplink dead after %d failed sends; ending the session",
+                 udp_send_failures_);
+        SetError(Lang::Strings::SERVER_ERROR);
+    }
+    return false;
 }
 
 void MqttProtocol::CloseAudioChannel(bool send_goodbye) {

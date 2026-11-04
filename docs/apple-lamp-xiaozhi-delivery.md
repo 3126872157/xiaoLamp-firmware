@@ -76,13 +76,13 @@ SDK脚本会生成角色专属归档和manifest。日常烧录包含应用/分�
 
 ## 新MCP工具
 
-| 工具 | 用途 |
-| --- | --- |
-| self.lamp.list_user_actions | 查询动态目录/描述/安装兼容性，名称描述是数据不是指令 |
-| self.lamp.play_user_actions | ids_json为1–16个ID数组，end_mode语义选项；返回本地job |
-| self.lamp.get_delivery_state | 查跟书/存储状态，或job_id的处理结果 |
-| self.lamp.start_book_tracking | 用操作者已确认的参数一次开启，不自动上力 |
-| self.lamp.stop_book_tracking | 停止并使待处理结果失效，保留支撑力矩 |
+| 工具                          | 用途                                                  |
+| ----------------------------- | ----------------------------------------------------- |
+| self.lamp.list_user_actions   | 查询动态目录/描述/安装兼容性，名称描述是数据不是指令  |
+| self.lamp.play_user_actions   | ids_json为1–16个ID数组，end_mode语义选项；返回本地job |
+| self.lamp.get_delivery_state  | 查跟书/存储状态，或job_id的处理结果                   |
+| self.lamp.start_book_tracking | 用操作者已确认的参数一次开启，不自动上力              |
+| self.lamp.stop_book_tracking  | 停止并使待处理结果失效，保留支撑力矩                  |
 
 job完成只说明本地处理完成；如果返回hardware task受理回执，仍用原get_state/任务API确认机械completed。不能把两层“completed”混为到位。静默语音回复不作交付硬条件。
 
@@ -170,3 +170,57 @@ job完成只说明本地处理完成；如果返回hardware task受理回执，�
 验证：双板 sync_lamp_catalog.py --check 通过（sha256 97232dec…），lamp_protocol/lamp_pose_plan 交叉编译语法检查通过，OV2640 delivery 构建成功并归档到 artifacts/lamp/xiaozhi-delivery/4ae9d8b0-2aa4c0164ab2/。
 
 未验证：本机无主机 C++ 编译器，test_lamp_protocol.py 的新断言未实际执行；“每轮必带表现”只能靠指令约束，是否调用工具仍由宿主决定；真机需复测站起/坐下/工作、连续多轮是否都有表现、以及动作失败时的灯光兜底。
+
+## 2026-11-04 修正：上行 UDP 失败不再刷屏；不做固件侧自动动作
+
+现场反馈两个问题：助手说完话没有动作；运行中持续打印 `E EspUdp: Send failed: ret=-1, errno=12`。
+
+**“说完没动作”不放在固件里解决**：是否调用 `self.lamp.*` 完全由宿主决定。曾尝试过在 `HardwareLoop()` 里监视 `kDeviceStateSpeaking`、在宿主没发工具调用时自动补一次 A01，但被判定为错误的层次——固件不应猜测对话意图，也不应在宿主不知情的情况下驱动关节。该实现已完整删除，改由宿主侧的提示词约束“说话必带动作”。固件只保留以下与之相关的**事实性**改动，它们不产生任何自主动作：
+
+- `Context()` 允许每轮 1–3 步、cue 命中任意一步、新增 `neutral`→`A01`，并把 `expression` 策略写进能力表——这是给宿主的可用空间，不是自动行为。
+- 对话表达可在实测位置自动使能、越界时先回当前模式 home 再执行（均只在该轮宿主确实发了表达时发生）。
+- `DIALOGUE_SKIPPED` 不再是静默的：`turn_id` 重复时打印 `LampHW: Dialogue skipped: turn_id '...' already used`。若宿主整场复用同一个 `turn_id`，第二句起所有表达都会被丢掉，这条日志就是排查证据。
+
+**`errno=12` 是什么**：`EspUdp::Send()` 里 `send()` 返回 ENOMEM，即 lwIP/WiFi TX 队列或 lwIP 堆拒绝了这个数据报，通常出现在链路拥塞或 AP 已经掉线的场景。原实现每 60 ms 一帧失败就 `ESP_LOGE` 一次，永不恢复。现在 `MqttProtocol::SendAudio()`：
+
+- 连续失败计数：第 1 次与每 30 次各打一条 `ESP_LOGW`，不再刷屏；
+- 累计 60 次（约 4 秒完全发不出去）时打一条 `ESP_LOGE` 并 `SetError()` 结束本次会话，走正常重连，而不是一直静默；
+- 成功一次即清零并提示 `Audio uplink recovered after N failed sends`；`udp_` 为空时也清零。
+
+验证：`ninja` 单独重编 `mqtt_protocol.cc.obj` 通过。真机待测：上行恢复后 `E EspUdp` 是否停止刷屏；`turn_id` 是否被宿主复用（看有无 `Dialogue skipped`）。
+
+边界：OV3660 无调光驱动，动作失败时没有灯光兜底。
+
+## 2026-11-04 修正：WiFi/lwIP 缓冲改从 PSRAM 分配（治 `errno=12` 根因）
+
+`EspUdp: Send failed: ret=-1, errno=12` 的完整链条（逐层可查）：
+
+| 层 | 位置 | 行为 |
+|---|---|---|
+| 1 | `managed_components/78__esp-ml307/src/esp/esp_udp.cc:85,91` | `send()` 返回 -1，`errno=12` |
+| 2 | `components/lwip/lwip/src/api/err.c:50` | `ERR_MEM` 映射为 `ENOMEM` |
+| 3 | `components/esp_netif/lwip/netif/wlanif.c:114-115` | `case ESP_ERR_NO_MEM: ret = ERR_MEM` ← **WiFi 驱动分配 TX 缓冲失败** |
+| 4 | 同上 `low_level_output` → `esp_netif_transmit_wrap` → `esp_wifi_internal_tx` | 每帧都要把数据复制进 WiFi TX 缓冲 |
+
+即：上行音频帧在加密后**根本没离开网卡**，不是服务器不可达。带宽不是原因——上行约 16.7 帧/秒 × 60~140 字节 ≈ 2 KB/s，而现场三条错误间隔正好 60 ms，说明是一次约 200 ms 的发射停顿。
+
+原配置为了省内部 RAM 从 ESP32-C3 抄过来并进一步压缩（`sdkconfig.defaults:25-32`、`sdkconfig.defaults.esp32s3:13-15`）：`ESP_WIFI_STATIC_RX_BUFFER_NUM=3`、`DYNAMIC_RX_BUFFER_NUM=6`、`RX_BA_WIN=3`、`ESP_WIFI_IRAM_OPT=n`、`RX_IRAM_OPT=n`，且 `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` 未开启——8 MB PSRAM 对 WiFi/lwIP 完全不可用，TX 缓冲只能从内部堆挤。
+
+改动（`sdkconfig.defaults.esp32s3`，仅此一处）：
+
+```
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+```
+
+连带效果（Kconfig 强制，非手工设置）：`ESP_WIFI_DYNAMIC_TX_BUFFER` 依赖 `!(SPIRAM_TRY_ALLOCATE_WIFI_LWIP && !SPIRAM_IGNORE_NOTFOUND)`，因此 TX 缓冲自动切为静态型——`ESP_WIFI_STATIC_TX_BUFFER=y`、`TX_BUFFER_TYPE=0`、`STATIC_TX_BUFFER_NUM=16`，并启用 32 深的 `ESP_WIFI_CACHE_TX_BUFFER_NUM`。IDF 帮助文本明确写着「If PSRAM is enabled, Static should be selected to guarantee enough WiFi TX buffers」；若 16 个静态缓冲全忙，后续包进入 32 深缓存队列而不是直接返回 ENOMEM，这正是本次要的语义。
+
+构建验证：OV2640 delivery 全量重建成功（2175 个目标），`xiaozhi.bin` 0x2b9170（2,855,280 B，分区余 31%），归档 `artifacts/lamp/xiaozhi-delivery/8bba44bc-d5c22466b230/`，`app_sha256=d5c22466b230…`。生成的 `sdkconfig` 已确认带上述四项。
+
+真机待测（每 10 秒 `SystemInfo: free sram: N minimal sram: M`）：
+1. `free sram` 是否明显高于改动前（WiFi/lwIP 缓冲已移出内部 RAM）；
+2. 长时间对话是否不再出现 `E EspUdp: Send failed`；
+3. 唤醒词、ASR/opus 收发、相机抽帧仍正常（PSRAM 缓冲对时序敏感，必须实测）。
+
+未做：`ESP_WIFI_STATIC_RX_BUFFER_NUM=3` 与 `RX_BA_WIN=3` 仍然偏低（IDF 在 PSRAM 模式下的默认是 10/16 与 16），但它们是既有配置、非本次回归；若第 2 项仍有残留，下一步再抬这两个值。OV3660 板需单独构建验证，配置共用同一个 `sdkconfig.defaults.esp32s3`。
+
+回滚方式：删除该行并重新构建；`sdkconfig` 会在下次 reconfigure 时回到动态 TX 缓冲。
