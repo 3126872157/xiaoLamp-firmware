@@ -195,12 +195,12 @@ job完成只说明本地处理完成；如果返回hardware task受理回执，�
 
 `EspUdp: Send failed: ret=-1, errno=12` 的完整链条（逐层可查）：
 
-| 层 | 位置 | 行为 |
-|---|---|---|
-| 1 | `managed_components/78__esp-ml307/src/esp/esp_udp.cc:85,91` | `send()` 返回 -1，`errno=12` |
-| 2 | `components/lwip/lwip/src/api/err.c:50` | `ERR_MEM` 映射为 `ENOMEM` |
-| 3 | `components/esp_netif/lwip/netif/wlanif.c:114-115` | `case ESP_ERR_NO_MEM: ret = ERR_MEM` ← **WiFi 驱动分配 TX 缓冲失败** |
-| 4 | 同上 `low_level_output` → `esp_netif_transmit_wrap` → `esp_wifi_internal_tx` | 每帧都要把数据复制进 WiFi TX 缓冲 |
+| 层  | 位置                                                                         | 行为                                                                 |
+| --- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| 1   | `managed_components/78__esp-ml307/src/esp/esp_udp.cc:85,91`                  | `send()` 返回 -1，`errno=12`                                         |
+| 2   | `components/lwip/lwip/src/api/err.c:50`                                      | `ERR_MEM` 映射为 `ENOMEM`                                            |
+| 3   | `components/esp_netif/lwip/netif/wlanif.c:114-115`                           | `case ESP_ERR_NO_MEM: ret = ERR_MEM` ← **WiFi 驱动分配 TX 缓冲失败** |
+| 4   | 同上 `low_level_output` → `esp_netif_transmit_wrap` → `esp_wifi_internal_tx` | 每帧都要把数据复制进 WiFi TX 缓冲                                    |
 
 即：上行音频帧在加密后**根本没离开网卡**，不是服务器不可达。带宽不是原因——上行约 16.7 帧/秒 × 60~140 字节 ≈ 2 KB/s，而现场三条错误间隔正好 60 ms，说明是一次约 200 ms 的发射停顿。
 
