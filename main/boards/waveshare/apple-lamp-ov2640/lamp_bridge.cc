@@ -63,6 +63,14 @@ std::string LightCommand(const std::string& id, double brightness) {
                             brightness);
     return lamp::Encode(command.get());
 }
+// Same semantic step envelope run_sequence accepts, with no options, for the
+// posture actions that deserve a dedicated tool.
+std::string ActionCommand(const std::string& id, const char* action_id) {
+    CJsonUniquePtr command(cJSON_Parse(lamp::Query("execute", id).c_str()));
+    cJSON_AddStringToObject(cJSON_GetObjectItemCaseSensitive(command.get(), "args"), "action_id",
+                            action_id);
+    return lamp::Encode(command.get());
+}
 bool ValidUrl(std::string url) {
     if (url.empty())
         return true;  // Empty disables the executor.
@@ -540,11 +548,14 @@ void RegisterLampTools(LampActionExecutor& executor) {
     auto& mcp = McpServer::GetInstance();
     mcp.AddTool(
         "self.lamp.list_primitives",
-        "Discover lamp-action/2 semantic actions. Query cursor pages or skill_id for options. "
-        "Use local presets, never angles/params/XYZ. sit:user; work:book; stand:both. "
-        "Target actions require calibration. get_state reports the executor role; local read-only "
-        "firmware exposes no motion capability.",
-        PropertyList({Property("cursor", kPropertyTypeInteger, 0, 0, 12),
+        "Discover lamp-action/2 semantics. cursor=0 returns the capability table: every step type "
+        "with its allowed values, including set_mode mode=[sit,stand,work] for standing up, "
+        "sitting down or the work posture. cursor=1..13 returns one primitive each by 1-based "
+        "position; skill_id returns one primitive plus its options. Use local presets, never "
+        "angles/params/XYZ. sit:user; work:book; stand:both. Primitives are expressions only; a "
+        "posture change is set_mode, never a primitive. Target primitives need calibration. "
+        "get_state reports the executor role; local read-only firmware exposes no motion.",
+        PropertyList({Property("cursor", kPropertyTypeInteger, 0, 0, 13),
                       Property("skill_id", kPropertyTypeString, std::string()).SetMaxLength(16)}),
         [&executor](const PropertyList& args) -> ReturnValue {
             CJsonUniquePtr catalog(cJSON_Parse(
@@ -553,21 +564,20 @@ void RegisterLampTools(LampActionExecutor& executor) {
             cJSON_AddBoolToObject(catalog.get(), "available", executor.Ready());
             CJsonUniquePtr state(cJSON_Parse(executor.State().c_str()));
             const auto role = lamp::Text(state.get(), "executor");
-            cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "executor",
-                                                   cJSON_CreateString(role.c_str()));
+            // actions/controls now ride only on the summary page, so a blind replace
+            // would leak the replacement on every primitive page.
+            auto replace = [&catalog](const char* key, cJSON* value) {
+                if (!cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), key, value))
+                    cJSON_Delete(value);
+            };
+            replace("executor", cJSON_CreateString(role.c_str()));
             if (role == "local_uart_read_only") {
-                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "primitives",
-                                                       cJSON_CreateArray());
-                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "actions",
-                                                       cJSON_CreateArray());
-                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "controls",
-                                                       cJSON_CreateArray());
-                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "total",
-                                                       cJSON_CreateNumber(0));
-                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "next_cursor",
-                                                       cJSON_CreateNumber(-1));
-                cJSON_ReplaceItemInObjectCaseSensitive(catalog.get(), "execution",
-                                                       cJSON_CreateString("hardware_read_only"));
+                replace("primitives", cJSON_CreateArray());
+                replace("actions", cJSON_CreateArray());
+                replace("controls", cJSON_CreateArray());
+                replace("total", cJSON_CreateNumber(0));
+                replace("next_cursor", cJSON_CreateNumber(-1));
+                replace("execution", cJSON_CreateString("hardware_read_only"));
             }
             if (role == "local_uart_hardware") {
                 // The executor reports whether this board really has a dimmer, so the
@@ -626,7 +636,7 @@ void RegisterLampTools(LampActionExecutor& executor) {
         "and cannot auto-enable; teaching/manual ownership blocks motion. For separate "
         "enable_torque, wait for completed; accepted is NOT enabled. "
         "Do not re-enable after each successful action. Unknown A12 is disabled; standing is "
-        "set_mode stand. "
+        "set_mode stand, which self.lamp.set_mode exposes directly and needs no calibration. "
         "Returns bridge_request_id; queued/answered is NOT motion completion. Poll get_state.",
         PropertyList(
             {Property("sequence_json", kPropertyTypeString).SetMaxLength(lamp::kMaxCommandBytes)}),
@@ -634,6 +644,38 @@ void RegisterLampTools(LampActionExecutor& executor) {
             auto command = lamp::Sequence(args["sequence_json"].value<std::string>());
             return command ? executor.Submit(*command)
                            : Failure("INVALID_REQUEST", command.error());
+        });
+    mcp.AddTool(
+        "self.lamp.set_mode",
+        "Switch the lamp to a standard body posture: stand up, sit down, or move to the working "
+        "posture. mode must be exactly 'stand', 'sit' or 'work' in lowercase. Keeps the current "
+        "Yaw (never turns toward the user or the book) and needs NO calibrated target, so empty "
+        "calibrated_targets must not block it. This is NOT a primitive: A03 (head down), A04 "
+        "(tuck in) and A13 (lean closer) must never be used to stand up or change posture. "
+        "Enables torque at the measured pose first when disarmed. Receipt is not completion; "
+        "poll get_state with the task_id.",
+        PropertyList({Property("mode", kPropertyTypeString).SetMaxLength(8)}),
+        [&executor](const PropertyList& args) -> ReturnValue {
+            const auto mode = args["mode"].value<std::string>();
+            if (mode != "sit" && mode != "stand" && mode != "work")
+                return Failure(
+                    "INVALID_REQUEST",
+                    "mode must be exactly 'sit', 'stand' or 'work' in lowercase; got \"" + mode +
+                        "\"");
+            CJsonUniquePtr command(
+                cJSON_Parse(ActionCommand(executor.NewRequestId(), "set_mode").c_str()));
+            cJSON_AddStringToObject(cJSON_GetObjectItemCaseSensitive(command.get(), "args"), "mode",
+                                    mode.c_str());
+            return executor.Submit(lamp::Encode(command.get()));
+        });
+    mcp.AddTool(
+        "self.lamp.restore_home",
+        "Return to the current mode's standard posture while keeping the current Yaw. Use it to "
+        "recover after hand guidance left the arm outside its mode envelope, or after an 'outside "
+        "mode' rejection. Does not change mode, does not need calibration, and does not enable "
+        "torque. Receipt is not completion; poll get_state with the task_id.",
+        PropertyList(), [&executor](const PropertyList&) -> ReturnValue {
+            return executor.Submit(ActionCommand(executor.NewRequestId(), "restore_home"));
         });
     mcp.AddTool(
         "self.lamp.get_state",

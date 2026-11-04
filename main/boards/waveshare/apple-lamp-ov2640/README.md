@@ -10,55 +10,55 @@ ES8311/ES7210 编解码芯片，改为**外接 I2S 数字功放**与**外接 PDM
 
 ### 相机 OV2640（DVP 8-bit，独立 SCCB 引脚）
 
-| OV2640 信号 | ESP32-S3 GPIO | Arduino Y 命名 |
-|---|---|---|
-| SIOD (SCCB SDA) | 4 | — |
-| SIOC (SCCB SCL) | 5 | — |
-| VSYNC | 6 | — |
-| HREF | 7 | — |
-| D2 | 8 | Y4 |
-| D1 | 9 | Y3 |
-| D3 | 10 | Y5 |
-| D0 | 11 | Y2 |
-| D4 | 12 | Y6 |
-| PCLK | 13 | — |
-| XCLK | 15 | — |
-| D7 | 16 | Y9 |
-| D6 | 17 | Y8 |
-| D5 | 18 | Y7 |
-| RESET | NC（不接） | — |
-| PWDN | NC（不接） | — |
+| OV2640 信号     | ESP32-S3 GPIO | Arduino Y 命名 |
+| --------------- | ------------- | -------------- |
+| SIOD (SCCB SDA) | 4             | —              |
+| SIOC (SCCB SCL) | 5             | —              |
+| VSYNC           | 6             | —              |
+| HREF            | 7             | —              |
+| D2              | 8             | Y4             |
+| D1              | 9             | Y3             |
+| D3              | 10            | Y5             |
+| D0              | 11            | Y2             |
+| D4              | 12            | Y6             |
+| PCLK            | 13            | —              |
+| XCLK            | 15            | —              |
+| D7              | 16            | Y9             |
+| D6              | 17            | Y8             |
+| D5              | 18            | Y7             |
+| RESET           | NC（不接）    | —              |
+| PWDN            | NC（不接）    | —              |
 
 XCLK 频率 20 MHz。
 
 ### 外接功放（I2S 数字功放，MAX98357A 一类）
 
-| 功放信号 | ESP32-S3 GPIO |
-|---|---|
-| BCLK | 38 |
-| LRCLK (LRC/WS) | 39 |
-| DIN (DATA) | 40 |
-| SD / 使能 | 接 3.3V 高电平（常开，无软件静音） |
+| 功放信号       | ESP32-S3 GPIO                      |
+| -------------- | ---------------------------------- |
+| BCLK           | 38                                 |
+| LRCLK (LRC/WS) | 39                                 |
+| DIN (DATA)     | 40                                 |
+| SD / 使能      | 接 3.3V 高电平（常开，无软件静音） |
 
 ### 外接麦克风（PDM 数字麦，INMP441 / SPK0641HT4H 一类）
 
 | 麦克风信号 | ESP32-S3 GPIO |
-|---|---|
-| CLK | 41 |
-| DATA | 42 |
+| ---------- | ------------- |
+| CLK        | 41            |
+| DATA       | 42            |
 
 > 音频引脚已从 GPIO9~13 移到 GPIO38~42，因为相机 DVP 总线占用 GPIO4~18
 > （D0=11、D1=9、D2=8、D3=10、D4=12、PCLK=13 与旧音频引脚冲突）。
 
 ### 控制与其他
 
-| 功能 | GPIO |
-|---|---|
-| BOOT 按键 | 0 |
-| 灯头 PWM 调光输出 | 1 |
-| 舵机 UART TX | 43 |
-| 舵机 UART RX | 44 |
-| 共地 | 所有外设 GND 连到 ESP32-S3 GND |
+| 功能              | GPIO                           |
+| ----------------- | ------------------------------ |
+| BOOT 按键         | 0                              |
+| 灯头 PWM 调光输出 | 1                              |
+| 舵机 UART TX      | 43                             |
+| 舵机 UART RX      | 44                             |
+| 共地              | 所有外设 GND 连到 ESP32-S3 GND |
 
 灯头调光输出为 **单路 PWM、10 位占空比、20 kHz、高电平点亮**，接 LED 驱动/MOSFET 的
 调光或使能脚；`LAMP_LIGHT_GPIO` 定义在 [config.h](./config.h)。GPIO1 是本板唯一空闲的
@@ -85,12 +85,12 @@ USB Serial/JTAG 占 GPIO19/20，Octal PSRAM 占 GPIO33–37，且 GPIO1 不是 E
 
 本板有两条互斥的联网路径，由构建角色（`CONFIG_APPLE_LAMP_OMNI_REALTIME`）决定：
 
-| 构建角色 | 协议 | 联网目标 | 是否需小智绑定/激活 |
-|---|---|---|---|
-| `apple-lamp-ov2640`（simulator，默认） | MQTT / WebSocket | 小智官方后台 | 需要 |
-| `local-readonly` / `local-hardware` / `local-twin` | MQTT / WebSocket | 小智官方后台 | 需要 |
-| `xiaozhi-delivery` | MQTT / WebSocket | 小智官方后台 | 需要 |
-| `omni-poc` / `edge-runtime` | OmniRealtimeProtocol | 直连阿里云百炼 MaaS（Qwen） | 不需要 |
+| 构建角色                                           | 协议                 | 联网目标                    | 是否需小智绑定/激活 |
+| -------------------------------------------------- | -------------------- | --------------------------- | ------------------- |
+| `apple-lamp-ov2640`（simulator，默认）             | MQTT / WebSocket     | 小智官方后台                | 需要                |
+| `local-readonly` / `local-hardware` / `local-twin` | MQTT / WebSocket     | 小智官方后台                | 需要                |
+| `xiaozhi-delivery`                                 | MQTT / WebSocket     | 小智官方后台                | 需要                |
+| `omni-poc` / `edge-runtime`                        | OmniRealtimeProtocol | 直连阿里云百炼 MaaS（Qwen） | 不需要              |
 
 - **小智后台路径**（默认）：开箱即用，走官方绑定、激活、OTA 与设备管理；设备首次联网需
   连接 `Xiaozhi-*` 热点完成配网绑定。
@@ -120,35 +120,40 @@ python scripts/build_lamp_variant.py --board apple-lamp-ov2640 --role omni-poc
 
 ### omni-poc 角色（2 个，只读）
 
-| 技能 | 参数 | 作用 |
-|---|---|---|
-| `lamp_get_state` | 无 | 读本地台灯缓存状态；不运动、不使能 |
-| `lamp_end_conversation` | 无 | 明确告别/停止聊天时结束会话；不坐下、不卸力 |
+| 技能                    | 参数 | 作用                                        |
+| ----------------------- | ---- | ------------------------------------------- |
+| `lamp_get_state`        | 无   | 读本地台灯缓存状态；不运动、不使能          |
+| `lamp_end_conversation` | 无   | 明确告别/停止聊天时结束会话；不坐下、不卸力 |
 
 ### edge-runtime 角色（10 个，含动作）
 
-| 技能 | 参数 | 作用 |
-|---|---|---|
-| `lamp_get_state` | 无 | 查询机械臂缓存；`available` 才表示五轴反馈新鲜 |
-| `lamp_end_conversation` | 无 | 广义告别/停止聊天；不坐下卸力 |
-| `lamp_rest` | 无 | 完整「去休息」：使能→坐下→卸力→成功后告别 |
-| `lamp_set_mode` | `mode`: sit/stand/work | 明确站起/坐下/工作，保持 yaw |
-| `lamp_stop` | 无 | 停止运动但保持支撑力矩 |
-| `lamp_get_task` | `task_id` | 查任务实际完成结果 |
-| `lamp_set_torque` | `enabled`: bool | 明确使能/卸力 |
-| `lamp_record_calibration` | `target_id`: user/book | 手摆对准后记录标定 |
-| `lamp_express` | `skill_id` / `action` / `speak` / `repetitions` / `end_mode` | 说话伴随表达：A01 点头、B02 歪头、B01 摇头、A02 兴奋、A03 低头、A16 强调 |
-| `lamp_run_sequence` | `steps`（1–16 步）、`enable_if_needed` | 执行动作或有限动作组 |
+| 技能                      | 参数                                                         | 作用                                                                     |
+| ------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `lamp_get_state`          | 无                                                           | 查询机械臂缓存；`available` 才表示五轴反馈新鲜                           |
+| `lamp_end_conversation`   | 无                                                           | 广义告别/停止聊天；不坐下卸力                                            |
+| `lamp_rest`               | 无                                                           | 完整「去休息」：使能→坐下→卸力→成功后告别                                |
+| `lamp_set_mode`           | `mode`: sit/stand/work                                       | 明确站起/坐下/工作，保持 yaw                                             |
+| `lamp_stop`               | 无                                                           | 停止运动但保持支撑力矩                                                   |
+| `lamp_get_task`           | `task_id`                                                    | 查任务实际完成结果                                                       |
+| `lamp_set_torque`         | `enabled`: bool                                              | 明确使能/卸力                                                            |
+| `lamp_record_calibration` | `target_id`: user/book                                       | 手摆对准后记录标定                                                       |
+| `lamp_express`            | `skill_id` / `action` / `speak` / `repetitions` / `end_mode` | 说话伴随表达：A01 点头、B02 歪头、B01 摇头、A02 兴奋、A03 低头、A16 强调 |
+| `lamp_run_sequence`       | `steps`（1–16 步）、`enable_if_needed`                       | 执行动作或有限动作组                                                     |
 
 表达技能 `lamp_express` 的 `action` 别名：`nod`/`sway`/`shake_head`/`tilt`/`emphasize` 等，
 `repetitions` 仅对 A01 点头有效（默认 2，明确 3–5 次才设置）。
 
 ### 设备端本地 MCP 服务器（`self.lamp.*`，不归云端 Qwen 调用）
 
-由 [lamp_bridge.cc](./lamp_bridge.cc) 的 `RegisterLampTools()` 注册，共 11 个 +
-1 个用户专用工具：`list_primitives`、`run_sequence`、`get_state`、`stop`、
-`execute_action`、`end_lighting`、`set_light`、`rest`、`release_torque`、`enable_torque`、
-`record_calibration`、`configure_bridge`（用户专用）。
+由 [lamp_bridge.cc](./lamp_bridge.cc) 的 `RegisterLampTools()` 注册，共 13 个 +
+1 个用户专用工具：`list_primitives`、`run_sequence`、`set_mode`、`restore_home`、`get_state`、
+`stop`、`execute_action`、`end_lighting`、`set_light`、`rest`、`release_torque`、
+`enable_torque`、`record_calibration`、`configure_bridge`（用户专用）。
+
+`set_mode(mode=sit/stand/work)` 是站起／坐下／工作位的唯一入口：保留当前 Yaw、不需要目标
+标定、未使能时先在实测位置使能。`list_primitives` 的 `cursor=0` 返回能力摘要页，列出每个
+step 动作的允许值（含 `set_mode` 的 `mode` 枚举），`cursor=1..13` 才是单个原语；姿态切换
+不是原语，A03/A04/A13 不能替代。
 
 这套走设备端 MCP 服务器路径（`local-*` / `local-twin` 角色与电脑桥），在 omni 协议里
 `SendMcpMessage` 是空实现，因此云端 Qwen 看不到 `self.lamp.*`。
@@ -164,14 +169,14 @@ python scripts/build_lamp_variant.py --board apple-lamp-ov2640 --role edge-runti
 `self.lamp.get_state` 的 `light_supported` 由 PWM 初始化结果决定，`light_on`/`light_level`
 反映当前输出；只有 `light_supported=true` 时 `list_primitives` 才公布 `A10`。
 
-| 语义 | 行为 |
-|---|---|
-| `set_light(brightness)` | 直接设定灯头亮度 `brightness`（0.0=关，1.0=最亮）；纯输出，任何状态下都可调用，不动姿态、不卸力 |
-| `A10` 聚光指示（`hold_mode=timed`，默认） | 对准目标后按本地预设 `brightness` 淡入，保持 `holdSec` 后熄灭 |
-| `A10` 聚光指示（`hold_mode=holding`） | 对准目标后灯光保持常亮，直到 `end_lighting` 或 `rest` |
-| `A16` 强调（`lightGain > 1`） | 与身体脉冲同节拍闪亮，峰值亮度把 `lightGain` 的 1.0–1.5 映射到 0–100% |
-| `end_lighting` | 立即关闭 PWM 输出（等价 `set_light(0)`），不动姿态、不卸力；无驱动时明确返回 `UNAVAILABLE` |
-| `rest` | 先关灯，再回坐姿并卸力 |
+| 语义                                      | 行为                                                                                            |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `set_light(brightness)`                   | 直接设定灯头亮度 `brightness`（0.0=关，1.0=最亮）；纯输出，任何状态下都可调用，不动姿态、不卸力 |
+| `A10` 聚光指示（`hold_mode=timed`，默认） | 对准目标后按本地预设 `brightness` 淡入，保持 `holdSec` 后熄灭                                   |
+| `A10` 聚光指示（`hold_mode=holding`）     | 对准目标后灯光保持常亮，直到 `end_lighting` 或 `rest`                                           |
+| `A16` 强调（`lightGain > 1`）             | 与身体脉冲同节拍闪亮，峰值亮度把 `lightGain` 的 1.0–1.5 映射到 0–100%                           |
+| `end_lighting`                            | 立即关闭 PWM 输出（等价 `set_light(0)`），不动姿态、不卸力；无驱动时明确返回 `UNAVAILABLE`      |
+| `rest`                                    | 先关灯，再回坐姿并卸力                                                                          |
 
 - `set_light` 是简化后的直接调光入口，`brightness` 取 0.0–1.0，映射到 10 位 PWM 占空比；
   其余复合动作（A10/A16）仍按本地预设 `brightness` 0.1–1 / `lightGain` 1–1.5 驱动灯光。
@@ -190,9 +195,9 @@ python scripts/build_lamp_variant.py --board apple-lamp-ov2640 --role edge-runti
 （与硬件验证过的 `camera_test` 程序一致，OV2640 JPEG 模式稳定）。
 **本板已删除周期自动拍摄**（相机只在「拍照预览」/手动附图时按需拍照，不再后台周期采样）。
 
-| 面板功能 | 操作 | AI 看到图像的方式 |
-|---|---|---|
-| **拍照预览** | 8080 面板「相机与单图语音」→ 拍照预览 | 仅本地预览，不发给模型 |
+| 面板功能     | 操作                                                | AI 看到图像的方式                                                |
+| ------------ | --------------------------------------------------- | ---------------------------------------------------------------- |
+| **拍照预览** | 8080 面板「相机与单图语音」→ 拍照预览               | 仅本地预览，不发给模型                                           |
 | **手动附图** | `开启手动附图`(vision_on) → `开始录音 → 结束并回复` | 图片随语音 `input_image_buffer.append` 加入对话，AI 自然看图回答 |
 
 实操让 AI 看图回答：

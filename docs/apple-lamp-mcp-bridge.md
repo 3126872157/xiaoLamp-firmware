@@ -25,21 +25,27 @@ MCP（官方服务与 ESP 的 JSON-RPC）和 `lamp-action/2`（设备与网页�
 用户提供的 [官方 MCP 接入点说明](https://my.feishu.cn/wiki/HiPEwZ37XiitnwktX13cEM5KnSb)
 介绍的是云端本地服务接入点；本实现使用固件已有的设备端 MCP，无需填写该接入点 token。
 
-| 工具 | 参数 | 行为 |
-| --- | --- | --- |
-| `self.lamp.list_primitives` | cursor（0–12，默认0）、skill_id（可选） | 每页一个原语，next_cursor=-1结束；可直接查 B02 等选项，available 表示执行器可达 |
-| `self.lamp.run_sequence` | sequence_json | 验证完整语义组后入队，返回 bridge_request_id；16步／60秒，整组预检在网页执行 |
-| `self.lamp.get_state` | bridge_request_id 或 task_id，均可省略 | 无参数读带 available 的缓存状态；请求ID读凭据；任务ID异步提交新的 get_task 查询 |
-| `self.lamp.stop` | task_id（可选） | 高优先级 cancel，全局停止清理尚未发送的运动；不卸力 |
-| `self.lamp.execute_action` | action_json | 单个 execute 业务外壳；支持需标定的 A10 holding，不塞进有限组 |
-| `self.lamp.end_lighting` | 无 | 提交 end_lighting；仅当 `get_state.light_supported` 为 true 时可用，无驱动时返回 UNAVAILABLE |
-| `self.lamp.configure_bridge` | url、token | 仅用户／操作员工具，NVS保存配置；不注册为模型自行选用的配置工具 |
+| 工具                         | 参数                                    | 行为                                                                                                                                                                                                                         |
+| ---------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `self.lamp.list_primitives`  | cursor（0–13，默认0）、skill_id（可选） | cursor=0 是能力摘要页：列出一条step可用的所有动作及允许值（含 set_mode 的 mode=[sit,stand,work]），primitives 为空；cursor=1–13 每页一个原语，next_cursor=-1 结束；skill_id 直接查单个原语及其选项；available 表示执行器可达 |
+| `self.lamp.run_sequence`     | sequence_json                           | 验证完整语义组后入队，返回 bridge_request_id；16步／60秒，整组预检在网页执行                                                                                                                                                 |
+| `self.lamp.set_mode`         | mode（sit/stand/work，小写）            | 切换标准身体姿态：站起／坐下／工作位。保留当前 Yaw，不需要目标标定，未使能时先在实测位置使能并确认力矩。不是原语，A03/A04/A13 不能替代                                                                                       |
+| `self.lamp.restore_home`     | 无                                      | 回到当前模式标准姿态并保留 Yaw；用于手掰后越出模式包络或 `Current pose outside mode` 拒绝后的恢复；不换模式、不上力                                                                                                          |
+| `self.lamp.get_state`        | bridge_request_id 或 task_id，均可省略  | 无参数读带 available 的缓存状态；请求ID读凭据；任务ID异步提交新的 get_task 查询                                                                                                                                              |
+| `self.lamp.stop`             | task_id（可选）                         | 高优先级 cancel，全局停止清理尚未发送的运动；不卸力                                                                                                                                                                          |
+| `self.lamp.execute_action`   | action_json                             | 单个 execute 业务外壳；支持需标定的 A10 holding，不塞进有限组                                                                                                                                                                |
+| `self.lamp.end_lighting`     | 无                                      | 提交 end_lighting；仅当 `get_state.light_supported` 为 true 时可用，无驱动时返回 UNAVAILABLE                                                                                                                                 |
+| `self.lamp.configure_bridge` | url、token                              | 仅用户／操作员工具，NVS保存配置；不注册为模型自行选用的配置工具                                                                                                                                                              |
 
 核心工具依赖 `LampActionExecutor` 的 Submit / Inspect / State / NewRequestId / Ready，
 HTTP 实现在 `LampBridgeExecutor`。后续可以实现本地执行器并替换实例，不改模型动作 ID、
 语义参数或常规工具注册。桥地址配置是网页适配器独立能力，不放进本地运动接口。
 
 目录来自 Web 生成的 `research/lamp_action_catalog.v2.json`，导入了13个开放原语。
+目录页按 cursor 分片：`cursor=0` 是能力摘要（actions 及其枚举，含 set_mode 的 mode），
+`cursor=1–13` 是单个原语；每页仍控制在900字节以内。actions/controls 只在摘要页下发，
+所以原语页不带它们；controls 不重复下发，因为 set_torque／rest／record_calibration
+已有各自的专用工具。
 不接受机械 params、axis、delta_rad、XYZ、未开放选项、禁用原语、旧协议或非法对话 context。
 模式权限、标定、几何、总时长、预检、默认参数冻结、对话冷却与执行由网页应用负责。
 同 request_id 不重复 POST；同ID不同命令拒绝。模拟暂停不被报告为到位。

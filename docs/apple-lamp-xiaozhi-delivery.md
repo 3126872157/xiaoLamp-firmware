@@ -134,3 +134,23 @@ job完成只说明本地处理完成；如果返回hardware task受理回执，�
 - 串口`Vision heap internal=前->后 largest=前->后 PSRAM=前->后`覆盖成功与错误路径；网页日志保留vision_deferred状态。固定JPEG缓冲减少反复分配，不表示JPEG编码器、TLS和JSON的所有动态分配都已消除。
 
 人工验收：先正常对话20轮，再手动观察至少10次，交替普通拍照和观察，开启跟书持续10分钟；保存堆日志，检查首轮缓存增长后是否稳定。期间说话/停止/卸力/断网测试，确保旧图不驱动、资源不足后能继续观察、真实错误未被伪装成功。两小时组合运行仍是交付验收要求。当前只本地构建与检查，不烧录，不使能；不能宣称实机问题已完全消失。
+
+## 2026-11-04 变更：set_mode 独立工具与目录能力页
+
+现象：用户说“站起来”被模型派给 A03（低头），因当前姿态越出 sit 包络而返回 `Current pose outside mode; restore Home first`。排查确认 set_mode 本身可用（回读在 URDF 内，current→stand 全程 Safe），真正的问题是模型看不到站起该发什么。
+
+根因：
+- delivery 角色没有 `lamp_set_mode` 工具，它只存在于 Edge Runtime（`CONFIG_APPLE_LAMP_EDGE_RUNTIME=n`）。
+- `Catalog()` 把 7 个 action 硬编码成裸字符串，从不读 JSON 的 `actions`，所以 `set_mode` 的 `mode` 枚举、默认值和说明都没下发。
+- 13 个原语的 `description` 也不在白名单里，模型对 A03 的全部认知只有“低头”二字。
+
+改动（OV3660 与 OV2640 同步）：
+- 新增 `self.lamp.set_mode`（mode=sit/stand/work，小写校验）、`self.lamp.restore_home`。二者复用 run_sequence 的同一语义 step 信封，未使能时由执行器在实测位置先使能。
+- `list_primitives` 改为 14 页：`cursor=0` 返回能力摘要（每条 action 的 id、内联枚举、简短 use），`cursor=1..13` 返回单个原语。actions/controls 只在摘要页下发；controls 不再重复，因为 set_torque/rest/record_calibration 已有专用工具。
+- catalog JSON 的 `actions` 补 `execute_primitive` 条目和各 action 的 `use`，`sync_lamp_catalog.py` 增加 `--board`。
+- `run_sequence` 与 `list_primitives` 的工具描述改为指向 set_mode，并明确“姿态切换不是原语”。
+- 读只读执行器分支改用安全替换，避免 actions/controls 不存在时泄漏。
+
+页预算（实测）：摘要页 831 字节，最大的原语页 709 字节（原先 857），全部在 900 以内。
+
+未验证：本机无主机 C++ 编译器，`test_lamp_protocol.py` 的 catalog 断言未实际运行；两板 delivery 固件未重新编译。真机需要复测“站起来”“切换工作姿态”，并确认日志里出现 `self.lamp.set_mode {mode:"stand"}`。

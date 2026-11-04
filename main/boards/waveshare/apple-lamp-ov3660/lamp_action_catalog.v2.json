@@ -420,7 +420,17 @@
   ],
   "actions": [
     {
+      "action_id": "execute_primitive",
+      "fields": {
+        "skill_id": {
+          "type": "string",
+          "description": "primitives[] 里的 id，如 A01"
+        }
+      }
+    },
+    {
       "action_id": "set_mode",
+      "use": "stand up / sit down / work",
       "fields": {
         "mode": {
           "type": "string",
@@ -436,10 +446,12 @@
     },
     {
       "action_id": "restore_home",
+      "use": "mode standard posture",
       "fields": {}
     },
     {
       "action_id": "restore_initial",
+      "use": "sit + Yaw zero",
       "fields": {}
     },
     {

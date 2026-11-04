@@ -15,7 +15,8 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (mode == "catalog") {
-        for (int i = 0; i < 13; ++i)
+        // Page 0 is the capability summary; pages 1..13 are one primitive each.
+        for (int i = 0; i <= 13; ++i)
             std::cout << lamp::Catalog(i) << '\n';
         return 0;
     }

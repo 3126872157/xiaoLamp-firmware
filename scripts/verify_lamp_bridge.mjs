@@ -48,8 +48,10 @@ async function waitTask(id) {
   }
   throw new Error('Task timeout');
 }
-const browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true,
-  args: ['--enable-unsafe-swiftshader', '--use-gl=angle', '--use-angle=swiftshader'] });
+const browser = await chromium.launch({
+  executablePath: process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true,
+  args: ['--enable-unsafe-swiftshader', '--use-gl=angle', '--use-angle=swiftshader']
+});
 try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const errors = []; page.on('pageerror', e => errors.push(e.message));
@@ -64,19 +66,26 @@ try {
   const nativePages = spawnSync(binary, ['catalog'], { encoding: 'utf8' });
   assert.equal(nativePages.status, 0);
   const pages = nativePages.stdout.trim().split(/\r?\n/).map(JSON.parse);
+  assert.equal(pages.length, 14);
+  assert.equal(pages[0].primitives.length, 0);
+  const summaryMode = pages[0].actions.find(a => a.action_id === 'set_mode');
+  assert.deepEqual(summaryMode.mode, ['sit', 'stand', 'work']);
   function strip(v) {
     if (Array.isArray(v)) return v.map(strip);
     if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).filter(([k]) => k !== 'description').map(([k, x]) => [k, strip(x)]));
     return v;
   }
   for (const p of pages) {
+    if (!p.primitives.length) continue;  // page 0 is the capability summary
     const def = p.primitives[0], actual = catalog.result.primitives.find(x => x.id === def.id);
     assert.ok(actual); assert.deepEqual(def.inputSchema, strip(actual.inputSchema));
   }
-  const sequence = adapter({ protocol_version: 'lamp-action/2', request_id: randomUUID(), steps: [
-    { action_id: 'set_mode', mode: 'stand' }, { action_id: 'execute_primitive', skill_id: 'A01', options: { repetitions: 1 } },
-    { action_id: 'wait', duration_sec: .1 }, { action_id: 'execute_primitive', skill_id: 'B01' },
-  ] });
+  const sequence = adapter({
+    protocol_version: 'lamp-action/2', request_id: randomUUID(), steps: [
+      { action_id: 'set_mode', mode: 'stand' }, { action_id: 'execute_primitive', skill_id: 'A01', options: { repetitions: 1 } },
+      { action_id: 'wait', duration_sec: .1 }, { action_id: 'execute_primitive', skill_id: 'B01' },
+    ]
+  });
   const accepted = await submit(sequence); assert.equal(accepted.ok, true, JSON.stringify(accepted));
   const done = await waitTask(accepted.result.task_id);
   assert.equal(done.status, 'completed'); assert.equal(done.completion_basis, 'simulation'); assert.equal(done.results.length, 4);
@@ -84,13 +93,17 @@ try {
   assert.equal((await submit(sequence)).result.task_id, accepted.result.task_id);
   const conflict = structuredClone(sequence); conflict.args.steps[1].options.repetitions = 2;
   assert.equal((await http('/v1/commands', conflict)).status, 409);
-  const invalidGroup = adapter({ protocol_version: 'lamp-action/2', request_id: randomUUID(), steps: [
-    { action_id: 'execute_primitive', skill_id: 'A01' }, { action_id: 'gaze_calibrated', target_id: 'book' },
-  ] });
+  const invalidGroup = adapter({
+    protocol_version: 'lamp-action/2', request_id: randomUUID(), steps: [
+      { action_id: 'execute_primitive', skill_id: 'A01' }, { action_id: 'gaze_calibrated', target_id: 'book' },
+    ]
+  });
   const rejected = await submit(invalidGroup); assert.equal(rejected.ok, false); assert.equal(rejected.error.code, 'GROUP_VALIDATION_FAILED');
   const context = { source: 'dialogue', turn_id: randomUUID(), cue: 'question' };
-  const expression = () => adapter({ protocol_version: 'lamp-action/2', request_id: randomUUID(),
-    steps: [{ action_id: 'execute_primitive', skill_id: 'B02' }], context });
+  const expression = () => adapter({
+    protocol_version: 'lamp-action/2', request_id: randomUUID(),
+    steps: [{ action_id: 'execute_primitive', skill_id: 'B02' }], context
+  });
   const expressed = await submit(expression()); assert.equal(expressed.ok, true, JSON.stringify(expressed));
   assert.equal((await waitTask(expressed.result.task_id)).status, 'completed');
   const duplicateTurn = await submit(expression()); assert.equal(duplicateTurn.ok, false); assert.equal(duplicateTurn.error.code, 'DIALOGUE_ALREADY_EXPRESSED');

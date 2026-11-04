@@ -51,14 +51,33 @@ class LampProtocolTests(unittest.TestCase):
     def test_catalog_pages_expose_all_thirteen_schema_without_numeric_tuning(self):
         result = subprocess.run([str(self.binary), "catalog"], text=True, encoding="utf-8", capture_output=True, check=True)
         pages = [json.loads(line) for line in result.stdout.splitlines()]
-        self.assertEqual(len(pages), 13)
-        self.assertEqual(len({p["primitives"][0]["id"] for p in pages}), 13)
+        # Page 0 is the capability summary; pages 1..13 are one primitive each.
+        self.assertEqual(len(pages), 14)
+        summary, primitives = pages[0], pages[1:]
         for page in pages:
             self.assertEqual(page["executor"], "web_sim")
             self.assertLessEqual(len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode()), 900)
+        self.assertEqual(summary["primitives"], [])
+        self.assertEqual(summary["total"], 13)
+        self.assertEqual(summary["next_cursor"], 1)
+        actions = {a["action_id"]: a for a in summary["actions"]}
+        self.assertEqual(actions["set_mode"]["mode"], ["sit", "stand", "work"])
+        self.assertIn("stand up", actions["set_mode"]["use"])
+        self.assertEqual(actions["execute_primitive"]["skill_id"], "string")
+        self.assertEqual(actions["adjust_pose"]["direction"],
+                         ["up", "down", "yaw_positive", "yaw_negative"])
+        self.assertEqual(actions["wait"]["duration_sec"], [0, 10])
+        for action in ("restore_home", "restore_initial", "gaze_calibrated"):
+            self.assertIn(action, actions)
+        self.assertNotIn("controls", summary)
+        self.assertEqual(len({p["primitives"][0]["id"] for p in primitives}), 13)
+        for page in primitives:
+            self.assertEqual(len(page["primitives"]), 1)
+            self.assertNotIn("actions", page)
             for key in page["primitives"][0]["inputSchema"]["properties"]:
                 self.assertIn(key, ("end_mode", "repetitions", "look_away", "hold_mode"))
-        self.assertEqual(pages[-1]["next_cursor"], -1)
+        self.assertEqual(primitives[-1]["next_cursor"], -1)
+        self.assertEqual([p["next_cursor"] for p in primitives[:-1]], list(range(2, 14)))
 
     def test_raw_joint_fields_and_unexposed_options_are_rejected(self):
         for step in [

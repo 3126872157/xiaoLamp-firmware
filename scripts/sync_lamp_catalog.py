@@ -5,17 +5,23 @@ import json
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
-board = root / "main/boards/waveshare/apple-lamp-ov3660"
+BOARDS = ("apple-lamp-ov3660", "apple-lamp-ov2640")
 parser = argparse.ArgumentParser()
+parser.add_argument("--board", choices=BOARDS, default=BOARDS[0],
+                    help="Lamp board whose catalog/header pair is regenerated (default: ov3660)")
 parser.add_argument("--source", type=Path)
 parser.add_argument("--check", action="store_true")
 args = parser.parse_args()
+board = root / "main/boards/waveshare" / args.board
 source = args.source or (board / "lamp_action_catalog.v2.json")
 catalog = json.loads(source.read_text(encoding="utf-8-sig"))
 assert catalog["protocol_version"] == "lamp-action/2"
 assert catalog["execution"] == "simulation"
 assert len(catalog["primitives"]) == 13
 assert catalog["limits"]["steps"] == 16
+assert [a["action_id"] for a in catalog["actions"]].count("set_mode") == 1
+assert [a["action_id"] for a in catalog["actions"]].count("execute_primitive") == 1
+assert set(catalog["actions"][0]["fields"]) == {"skill_id"}
 for primitive in catalog["primitives"]:
     for field in primitive["inputSchema"]["properties"].values():
         assert field["type"] in ("integer", "string")
@@ -40,4 +46,5 @@ else:
     destination.write_text(header, encoding="utf-8", newline="\n")
     (board / "lamp_action_catalog.v2.json").write_text(
         json.dumps(catalog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
-print(f"Semantic catalog: {len(catalog['primitives'])} primitives, sha256={digest}")
+print(f"Semantic catalog: {len(catalog['primitives'])} primitives, sha256={digest}, "
+      f"board={args.board}")

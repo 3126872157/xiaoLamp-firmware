@@ -156,6 +156,33 @@ void StripDescriptions(cJSON* value) {
     for (auto* item = value ? value->child : nullptr; item; item = item->next)
         StripDescriptions(item);
 }
+// One line per action: its id, the allowed value(s) of each field, and a short
+// usage hint. Enums are inlined under the field name because the model needs the
+// exact spellings, not the JSON-Schema shape they came from.
+void CopyActionSummary(cJSON* item, const cJSON* spec) {
+    Copy(item, spec, "action_id");
+    auto* fields = cJSON_GetObjectItemCaseSensitive(spec, "fields");
+    for (auto* field = cJSON_IsObject(fields) ? fields->child : nullptr; field;
+         field = field->next) {
+        if (!field->string)
+            continue;
+        auto* enums = cJSON_GetObjectItemCaseSensitive(field, "enum");
+        if (cJSON_IsArray(enums)) {
+            cJSON_AddItemToObject(item, field->string, cJSON_Duplicate(enums, true));
+            continue;
+        }
+        auto* min = cJSON_GetObjectItemCaseSensitive(field, "minimum");
+        auto* max = cJSON_GetObjectItemCaseSensitive(field, "maximum");
+        if (cJSON_IsNumber(min) && cJSON_IsNumber(max)) {
+            auto* range = cJSON_AddArrayToObject(item, field->string);
+            cJSON_AddItemToArray(range, cJSON_CreateNumber(min->valuedouble));
+            cJSON_AddItemToArray(range, cJSON_CreateNumber(max->valuedouble));
+        } else {
+            cJSON_AddStringToObject(item, field->string, Text(field, "type").c_str());
+        }
+    }
+    Copy(item, spec, "use");
+}
 }  // namespace
 
 std::string Encode(const cJSON* value) {
@@ -299,8 +326,15 @@ std::string Catalog(int cursor, const std::string& skill_id) {
     auto* primitives = cJSON_AddArrayToObject(out.get(), "primitives");
     auto* source = cJSON_GetObjectItemCaseSensitive(catalog.get(), "primitives");
     const int count = cJSON_GetArraySize(source);
-    const cJSON* def =
-        skill_id.empty() ? cJSON_GetArrayItem(source, cursor) : FindSkill(catalog.get(), skill_id);
+    // Page 0 is the capability summary: it carries the actions a step may use,
+    // so every primitive page can stay small enough to stream one at a time.
+    const bool summary = skill_id.empty() && cursor <= 0;
+    const int index = cursor - 1;
+    const cJSON* def = nullptr;
+    if (!skill_id.empty())
+        def = FindSkill(catalog.get(), skill_id);
+    else if (!summary && index >= 0 && index < count)
+        def = cJSON_GetArrayItem(source, index);
     if (def) {
         auto* item = cJSON_CreateObject();
         for (auto* key :
@@ -310,17 +344,27 @@ std::string Catalog(int cursor, const std::string& skill_id) {
         cJSON_AddItemToArray(primitives, item);
     }
     cJSON_AddNumberToObject(out.get(), "total", count);
-    cJSON_AddNumberToObject(out.get(), "next_cursor",
-                            skill_id.empty() && cursor + 1 < count ? cursor + 1 : -1);
+    int next = -1;
+    if (skill_id.empty()) {
+        if (summary)
+            next = count ? 1 : 0;
+        else if (index >= 0 && index + 1 < count)
+            next = cursor + 1;
+    }
+    cJSON_AddNumberToObject(out.get(), "next_cursor", next);
     if (!skill_id.empty() && !def)
         cJSON_AddStringToObject(out.get(), "error", "Unknown primitive");
-    auto* controls = cJSON_AddArrayToObject(out.get(), "controls");
-    for (auto* key : {"set_torque", "rest", "record_calibration"})
-        cJSON_AddItemToArray(controls, cJSON_CreateString(key));
-    auto* actions = cJSON_AddArrayToObject(out.get(), "actions");
-    for (auto* key : {"set_mode", "restore_home", "restore_initial", "adjust_pose",
-                      "gaze_calibrated", "execute_primitive", "wait"})
-        cJSON_AddItemToArray(actions, cJSON_CreateString(key));
+    if (summary) {
+        // controls stay out of the payload: set_torque, rest and
+        // record_calibration already have dedicated tools.
+        auto* actions = cJSON_AddArrayToObject(out.get(), "actions");
+        auto* specs = cJSON_GetObjectItemCaseSensitive(catalog.get(), "actions");
+        for (auto* spec = specs ? specs->child : nullptr; spec; spec = spec->next) {
+            auto* item = cJSON_CreateObject();
+            CopyActionSummary(item, spec);
+            cJSON_AddItemToArray(actions, item);
+        }
+    }
     return Encode(out.get());
 }
 std::string Summarize(const cJSON* response) {
