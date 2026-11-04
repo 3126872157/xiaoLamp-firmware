@@ -128,21 +128,38 @@ Result Context(const cJSON* args, const cJSON* steps, bool group) {
     if (Text(context, "source") != "dialogue" || !ValidId(turn))
         return std::unexpected("Invalid dialogue context");
     const auto cue = Text(context, "cue");
-    const std::pair<const char*, const char*> cues[] = {{"agreement", "A01"}, {"question", "B02"},
-                                                        {"denial", "B01"},    {"excitement", "A02"},
-                                                        {"regret", "A03"},    {"emphasis", "A16"}};
-    const cJSON* step = group ? cJSON_GetArrayItem(steps, 0) : args;
-    if (group && cJSON_GetArraySize(steps) != 1)
-        return std::unexpected("Dialogue permits one expression per turn");
-    bool match = false;
+    // `neutral` is the no-emotion fallback: the host still wants a visible
+    // reaction, so one A01 is the contract instead of silence.
+    const std::pair<const char*, const char*> cues[] = {
+        {"agreement", "A01"}, {"question", "B02"}, {"denial", "B01"}, {"excitement", "A02"},
+        {"regret", "A03"},    {"emphasis", "A16"}, {"neutral", "A01"}};
+    if (cue.empty())
+        return std::unexpected("Dialogue context needs a cue");
+    bool known = false;
     for (const auto& [key, skill] : cues)
-        if (cue == key && Text(step, "skill_id") == skill)
-            match = true;
-    if (!match || Text(step, "action_id") != "execute_primitive")
-        return std::unexpected("Dialogue cue does not match expression");
-    auto* options = cJSON_GetObjectItemCaseSensitive(step, "options");
-    if (Text(options, "end_mode") == "hold_at_end")
-        return std::unexpected("Dialogue expressions must return to reference");
+        if (cue == key)
+            known = true;
+    if (!known)
+        return std::unexpected("Unknown dialogue cue");
+    // One turn may carry a short expression sequence, but every step must be an
+    // expression: a posture change or wait inside a dialogue turn is refused.
+    const int steps_count = group ? cJSON_GetArraySize(steps) : 1;
+    if (steps_count < 1 || steps_count > 3)
+        return std::unexpected("Dialogue permits 1-3 expression steps per turn");
+    bool match = false;
+    for (int i = 0; i < steps_count; i++) {
+        const cJSON* step = group ? cJSON_GetArrayItem(steps, i) : args;
+        if (Text(step, "action_id") != "execute_primitive")
+            return std::unexpected("Dialogue permits expressions only");
+        for (const auto& [key, skill] : cues)
+            if (cue == key && Text(step, "skill_id") == skill)
+                match = true;
+        auto* options = cJSON_GetObjectItemCaseSensitive(step, "options");
+        if (Text(options, "end_mode") == "hold_at_end")
+            return std::unexpected("Dialogue expressions must return to reference");
+    }
+    if (!match)
+        return std::unexpected("Dialogue cue does not match any expression in the turn");
     return {};
 }
 void Copy(cJSON* out, const cJSON* in, const char* key) {
@@ -348,6 +365,17 @@ std::string Catalog(int cursor, const std::string& skill_id) {
     if (!skill_id.empty() && !def)
         cJSON_AddStringToObject(out.get(), "error", "Unknown primitive");
     if (summary) {
+        // The four strategy blocks ride only on the summary page so a primitive
+        // page stays inside its byte budget while the model still sees the facts
+        // it cannot infer: what each posture physically means, when completion is
+        // real, when torque may be gained, and the per-turn expression contract.
+        for (auto* key : {"postures", "completion", "enable", "expression"})
+            Copy(out.get(), catalog.get(), key);
+        // Identity, limits and constants stay on every primitive page, so the
+        // summary page drops them to make room for the strategy blocks.
+        for (auto* key :
+             {"model_version", "mode_targets", "limits", "local_parameters", "execution"})
+            cJSON_DeleteItemFromObjectCaseSensitive(out.get(), key);
         // controls stay out of the payload: set_torque, rest and
         // record_calibration already have dedicated tools.
         auto* actions = cJSON_AddArrayToObject(out.get(), "actions");

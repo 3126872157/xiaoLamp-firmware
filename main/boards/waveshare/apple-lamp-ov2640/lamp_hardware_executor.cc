@@ -604,9 +604,11 @@ std::string LampHardwareExecutor::SubmitChecked(const std::string& body, bool pa
     const auto* context = Item(args, "context");
     if (context) {
         const auto turn = lamp::Text(context, "turn_id");
-        if (turns_.contains(turn) ||
-            (dialogue_at_ && esp_timer_get_time() - dialogue_at_ < 2500000))
-            return Error("DIALOGUE_SKIPPED", "Turn already used or cooldown");
+        // Only the turn id is deduplicated. A fixed cooldown would contradict the
+        // requirement that every spoken reply carries a visible reaction; back-to-back
+        // turns are ordered by the BUSY check instead.
+        if (turns_.contains(turn))
+            return Error("DIALOGUE_SKIPPED", "Turn already used");
         if (turns_.size() >= 64)
             turns_.erase(turns_.begin());
         turns_.insert(turn);
@@ -1051,6 +1053,18 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
             if (epoch_ == token && (!endpoint_timeout_ || !stopped))
                 armed_ = false;
         }
+        // A spoken turn must still show something. When the motion path is
+        // unavailable (out-of-envelope, blocked route, endpoint timeout) pulse the
+        // dimmer instead: pure output, no pose change, no torque change.
+        if (Item(args, "context") && lamp::light::Available()) {
+            const double restore = lamp::light::Level();
+            lamp::light::SetLevel(0.8);
+            vTaskDelay(pdMS_TO_TICKS(300));
+            lamp::light::SetLevel(0.15);
+            vTaskDelay(pdMS_TO_TICKS(250));
+            lamp::light::SetLevel(restore);
+            RecordDiagnostic("light_fallback", id, "Motion unavailable; pulsed the dimmer instead");
+        }
         Finish(id, epoch_ == token ? "failed" : "cancelled", why);
     };
     auto reject = [&](const std::string& why) { Finish(id, "failed", why); };
@@ -1117,9 +1131,10 @@ void LampHardwareExecutor::Execute(const std::string& body, uint32_t token) {
     {
         std::lock_guard lock(mutex_);
         if (!armed_) {
-            // A direct semantic motion request grants enable for this task. Background
-            // expressions, tracking, teaching and manual control never gain it implicitly.
-            enable_for_request = !manual_ && !teaching_owned_ && !Item(args, "context") &&
+            // A spoken reply must carry a visible reaction, so a dialogue-tagged
+            // expression may also gain torque at the measured pose. Teaching and
+            // manual ownership still block it, and background vision never does.
+            enable_for_request = !manual_ && !teaching_owned_ &&
                                  (op == "execute" || op == "execute_group" || op == "rest");
             if (!enable_for_request) {
                 records_.at(id).status = "failed";

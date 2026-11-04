@@ -497,8 +497,11 @@ Pose Plan::At(double seconds) const {
     }
     return q;
 }
-Plan Build(const Configuration& config, int mode, const Pose& current, const cJSON* step,
+Plan Build(const Configuration& config, int mode, const Pose& measured, const cJSON* step,
            bool dialogue) {
+    // Work on a mutable copy: a dialogue expression may first recover to the mode
+    // home, and everything downstream must plan from that recovered pose.
+    Pose current = measured;
     Plan plan;
     plan.entry = current;
     plan.reference = current;

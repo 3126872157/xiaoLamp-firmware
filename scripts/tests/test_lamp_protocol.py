@@ -54,15 +54,25 @@ class LampProtocolTests(unittest.TestCase):
         # Page 0 is the capability summary; pages 1..13 are one primitive each.
         self.assertEqual(len(pages), 14)
         summary, primitives = pages[0], pages[1:]
-        for page in pages:
-            self.assertEqual(page["executor"], "web_sim")
-            self.assertLessEqual(len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode()), 900)
         self.assertEqual(summary["primitives"], [])
         self.assertEqual(summary["total"], 13)
         self.assertEqual(summary["next_cursor"], 1)
+        # The summary page also carries postures/completion/enable/expression, so it
+        # is allowed 1000 bytes; a primitive page must stay at 900 or below.
+        self.assertLessEqual(len(json.dumps(summary, ensure_ascii=False, separators=(",", ":")).encode()), 1000)
+        for page in pages:
+            self.assertEqual(page["executor"], "web_sim")
+        for page in primitives:
+            self.assertLessEqual(len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode()), 900)
+        self.assertEqual(summary["postures"]["work"], "降低/俯视")
+        self.assertIn("completed", summary["completion"])
+        self.assertIn("使能", summary["enable"])
+        self.assertIn("A01", summary["expression"])
+        self.assertIn("executor", summary)
+        self.assertNotIn("mode_targets", summary)
         actions = {a["action_id"]: a for a in summary["actions"]}
         self.assertEqual(actions["set_mode"]["mode"], ["sit", "stand", "work"])
-        self.assertIn("stand up", actions["set_mode"]["use"])
+        self.assertIn("站起", actions["set_mode"]["use"])
         self.assertEqual(actions["execute_primitive"]["skill_id"], "string")
         self.assertEqual(actions["adjust_pose"]["direction"],
                          ["up", "down", "yaw_positive", "yaw_negative"])
@@ -71,9 +81,14 @@ class LampProtocolTests(unittest.TestCase):
             self.assertIn(action, actions)
         self.assertNotIn("controls", summary)
         self.assertEqual(len({p["primitives"][0]["id"] for p in primitives}), 13)
+        names = {p["primitives"][0]["id"]: p["primitives"][0]["name"] for p in primitives}
+        self.assertIn("非站起", names["A03"])
+        self.assertIn("非坐下", names["A04"])
+        self.assertIn("否定", names["B01"])
         for page in primitives:
             self.assertEqual(len(page["primitives"]), 1)
             self.assertNotIn("actions", page)
+            self.assertNotIn("postures", page)
             for key in page["primitives"][0]["inputSchema"]["properties"]:
                 self.assertIn(key, ("end_mode", "repetitions", "look_away", "hold_mode"))
         self.assertEqual(primitives[-1]["next_cursor"], -1)
@@ -113,14 +128,28 @@ class LampProtocolTests(unittest.TestCase):
             self.sequence([{"action_id": "restore_home"}], request_id=" \t"),
         ]: self.run_adapter(request, valid=False)
 
-    def test_dialogue_context_matches_one_expression_and_returns_reference(self):
+    def test_dialogue_context_allows_short_expression_sequences(self):
         context = {"source": "dialogue", "turn_id": "turn-42", "cue": "question"}
+        # One expression, and up to three, are allowed; the cue must match any step.
         self.run_adapter(self.sequence([{"action_id": "execute_primitive", "skill_id": "B02"}], context=context))
+        self.run_adapter(self.sequence([{"action_id": "execute_primitive", "skill_id": "A01"},
+                                        {"action_id": "execute_primitive", "skill_id": "B02"},
+                                        {"action_id": "execute_primitive", "skill_id": "B01"}], context=context))
+        # `neutral` is the no-emotion fallback and must resolve to A01.
+        neutral = {"source": "dialogue", "turn_id": "turn-43", "cue": "neutral"}
+        self.run_adapter(self.sequence([{"action_id": "execute_primitive", "skill_id": "A01"}], context=neutral))
+        self.run_adapter(self.sequence([{"action_id": "execute_primitive", "skill_id": "B02"}], context=neutral), valid=False)
         for steps in [
+            # A cue that matches no step in the turn.
             [{"action_id": "execute_primitive", "skill_id": "A01"}],
-            [{"action_id": "execute_primitive", "skill_id": "B02"}] * 2,
+            # More than three expressions.
+            [{"action_id": "execute_primitive", "skill_id": "B02"}] * 4,
             [{"action_id": "execute_primitive", "skill_id": "B02", "options": {"end_mode": "hold_at_end"}}],
+            # A posture change is not an expression.
+            [{"action_id": "set_mode", "mode": "stand"}],
         ]: self.run_adapter(self.sequence(steps, context=context), valid=False)
+        self.run_adapter(self.sequence([{"action_id": "execute_primitive", "skill_id": "A01"}],
+                                       context={"source": "dialogue", "turn_id": "turn-44", "cue": "angry"}), valid=False)
 
     def test_persistent_lighting_requires_single_execute(self):
         step = {"action_id": "execute_primitive", "skill_id": "A10", "target_id": "book", "options": {"hold_mode": "holding"}}

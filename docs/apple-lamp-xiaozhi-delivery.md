@@ -154,3 +154,19 @@ job完成只说明本地处理完成；如果返回hardware task受理回执，�
 页预算（实测）：摘要页 831 字节，最大的原语页 709 字节（原先 857），全部在 900 以内。
 
 未验证：本机无主机 C++ 编译器，`test_lamp_protocol.py` 的 catalog 断言未实际运行；两板 delivery 固件未重新编译。真机需要复测“站起来”“切换工作姿态”，并确认日志里出现 `self.lamp.set_mode {mode:"stand"}`。
+
+## 2026-11-04 变更：描述词中文化、能力表扩充、每轮必带表现
+
+问题：工具描述全英文且冗长（18 条共 7846 字节，run_sequence 单条 1901 字节），原语 description 与选项 description 被 StripDescriptions 剥离后完全不可见，6 处旧文案与硬件实现不符，且“说话配动作”被 2.5 秒冷却与“对话表达不自使能”两条限制挡住。
+
+改动（OV3660 与 OV2640 同步）：
+- 18 条工具描述改中文并压缩到约 4200 字节；工具名、枚举、skill_id、cue、end_mode 保持 ASCII。高风险意图加中文触发锚点（站起/坐下/开始工作、去休息、别用力、靠近一点、开灯/关灯）。
+- 修正 6 处事实错误：get_state 的 simulator/hardware arrival、release_torque 的 simulates torque only、record_calibration 的 future hardware executor、run_sequence 与 set_mode 的互斥指令、execute_action 的 A01..A16 范围、set_mode 未说明手动/示教会拒绝。
+- 能力表（cursor=0）新增 postures／completion／enable／expression 四块策略；每页预算上限由 900 提到 1000（摘要页实测 990），原语页仍守 900（实测最差 715）。摘要页不再重复 model_version/mode_targets/limits/local_parameters/execution，它们仍在每个原语页。
+- 6 个原语改名消歧：A02 兴奋摇摆、A03 低头低落（非站起）、A04 收拢休息（非坐下）、A11 转开视线、A14 后退避开、B01 摇头否定。skill_id 与 NVS 绑定不变。
+- 删除 JSON 中 9 条从未被固件读取的 mcp_tool_descriptions。
+- 每轮必带表现：Context() 允许 1–3 步（原为 1 步）、cue 命中任意一步、新增 neutral→A01；executor 去掉 2.5 秒冷却（仅按 turn_id 去重）；对话表达在实测位置可自动使能（示教与手动仍阻止）；表达遇模式包络越界时先回到当前模式 home（保留 yaw）再执行，并标 limited；OV2640 动作失败且带 context 时用灯头亮度脉冲兜底。
+
+验证：双板 sync_lamp_catalog.py --check 通过（sha256 97232dec…），lamp_protocol/lamp_pose_plan 交叉编译语法检查通过，OV2640 delivery 构建成功并归档到 artifacts/lamp/xiaozhi-delivery/4ae9d8b0-2aa4c0164ab2/。
+
+未验证：本机无主机 C++ 编译器，test_lamp_protocol.py 的新断言未实际执行；“每轮必带表现”只能靠指令约束，是否调用工具仍由宿主决定；真机需复测站起/坐下/工作、连续多轮是否都有表现、以及动作失败时的灯光兜底。

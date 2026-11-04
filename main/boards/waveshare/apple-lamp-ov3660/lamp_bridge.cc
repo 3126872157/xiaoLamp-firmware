@@ -542,13 +542,10 @@ void RegisterLampTools(LampActionExecutor& executor) {
     auto& mcp = McpServer::GetInstance();
     mcp.AddTool(
         "self.lamp.list_primitives",
-        "Discover lamp-action/2 semantics. cursor=0 returns the capability table: every step type "
-        "with its allowed values, including set_mode mode=[sit,stand,work] for standing up, "
-        "sitting down or the work posture. cursor=1..13 returns one primitive each by 1-based "
-        "position; skill_id returns one primitive plus its options. Use local presets, never "
-        "angles/params/XYZ. sit:user; work:book; stand:both. Primitives are expressions only; a "
-        "posture change is set_mode, never a primitive. Target primitives need calibration. "
-        "get_state reports the executor role; local read-only firmware exposes no motion.",
+        "查询能力表与表情原语。cursor=0 返回能力表：所有 step 动作与其允许值（含 set_mode 的 "
+        "sit/stand/work），以及 postures、completion、enable、expression 四块策略；cursor=1..13 "
+        "按序返回单个原语；skill_id 直接查一个原语及其选项。只用本地预设，禁止角度、参数、坐标。"
+        "原语只是表情，切换姿态必须用 set_mode，绝不是原语。需要目标的原语必须先标定。",
         PropertyList({Property("cursor", kPropertyTypeInteger, 0, 0, 13),
                       Property("skill_id", kPropertyTypeString, std::string()).SetMaxLength(16)}),
         [&executor](const PropertyList& args) -> ReturnValue {
@@ -592,34 +589,12 @@ void RegisterLampTools(LampActionExecutor& executor) {
         });
     mcp.AddTool(
         "self.lamp.run_sequence",
-        "Submit a complete finite semantic group (1-16 steps, <=60s). sequence_json is "
-        "{protocol_version:'lamp-action/"
-        "2',request_id:'unique-stable-id',steps:[{action_id:'execute_primitive',skill_id:'A01'}],"
-        "context?:...}. "
-        "set_mode(sit/stand/work) and restore_home preserve CURRENT Yaw; body posture only. "
-        "restore_initial explicitly returns sit with Yaw zero. Do not turn toward user/book for a "
-        "mode switch. "
-        "Approach/靠近我一点 uses A13,target_id=user (or approach tool), NOT adjust_pose down or "
-        "A03. "
-        "Other actions: adjust_pose(direction "
-        "up/down/yaw_positive/yaw_negative,size small/medium/large), "
-        "gaze_calibrated(target_id user/book), wait(duration_sec 0-10). Never mechanical params. "
-        "Natural dialogue may use one expression with "
-        "context:{source:'dialogue',turn_id:'stable-turn',cue:'agreement|question|denial|"
-        "excitement|regret|emphasis'}. "
-        "Cue maps to A01/B02/B01/A02/A03/A16. Skip busy/cooldown, never retry with new IDs. "
-        "Be warmly expressive when context fits: vary agreement/question/excitement/emphasis, "
-        "not only explicit motion orders; at most one automatic expression per turn. "
-        "'Nod once' and 'nod twice' each mean ONE A01 invocation with local default two nods; "
-        "never submit two A01 steps for 'nod twice'. Explicit 3-5 nods use options.repetitions. "
-        "A direct user motion request (stand/sit/move) must call run_sequence even if disarmed: "
-        "the hardware executor enables and confirms torque at the measured pose first. Do not "
-        "just reply that enable is required. Automatic dialogue expressions must include context "
-        "and cannot auto-enable; teaching/manual ownership blocks motion. For separate "
-        "enable_torque, wait for completed; accepted is NOT enabled. "
-        "Do not re-enable after each successful action. Unknown A12 is disabled; standing is "
-        "set_mode stand, which self.lamp.set_mode exposes directly and needs no calibration. "
-        "Returns bridge_request_id; queued/answered is NOT motion completion. Poll get_state.",
+        "提交有限语义组（1-16 步，≤60 秒）。分工：姿态用 set_mode，单个表情用 execute_action，"
+        "多步组合或说话配动作才用这里。说话配动作时带 "
+        "context:{source:'dialogue',turn_id:'本轮唯一',cue:'agreement|question|denial|excitement|"
+        "regret|emphasis'}，"
+        "一轮至少一个表现、至多三步，允许 A01 兜底。忙或冷却时跳过，不要换 id 重试。"
+        "回执不等于到位，用 get_state 查。",
         PropertyList(
             {Property("sequence_json", kPropertyTypeString).SetMaxLength(lamp::kMaxCommandBytes)}),
         [&executor](const PropertyList& args) -> ReturnValue {
@@ -629,43 +604,34 @@ void RegisterLampTools(LampActionExecutor& executor) {
         });
     mcp.AddTool(
         "self.lamp.set_mode",
-        "Switch the lamp to a standard body posture: stand up, sit down, or move to the working "
-        "posture. mode must be exactly 'stand', 'sit' or 'work' in lowercase. Keeps the current "
-        "Yaw (never turns toward the user or the book) and needs NO calibrated target, so empty "
-        "calibrated_targets must not block it. This is NOT a primitive: A03 (head down), A04 "
-        "(tuck in) and A13 (lean closer) must never be used to stand up or change posture. "
-        "Enables torque at the measured pose first when disarmed. Receipt is not completion; "
-        "poll get_state with the task_id.",
+        "切换标准身体姿态。mode 必须是小写 sit、stand、work：sit 最低且灯头略仰，stand 最高且接近"
+        "水平，work 降低并俯视桌面。保留当前 yaw，不需要目标标定，空 calibrated_targets "
+        "不能挡住它。"
+        "未使能时会先在实测位置使能；手动控制或示教进行中会被拒绝。这是姿态唯一入口，A03 低头低落、"
+        "A04 收拢休息、A13 靠近都不能代替。回执不等于到位，用 task_id 查 get_state。",
         PropertyList({Property("mode", kPropertyTypeString).SetMaxLength(8)}),
         [&executor](const PropertyList& args) -> ReturnValue {
             const auto mode = args["mode"].value<std::string>();
             if (mode != "sit" && mode != "stand" && mode != "work")
-                return Failure(
-                    "INVALID_REQUEST",
-                    "mode must be exactly 'sit', 'stand' or 'work' in lowercase; got \"" + mode +
-                        "\"");
+                return Failure("INVALID_REQUEST",
+                               "mode 必须是小写 sit、stand 或 work；收到的是 \"" + mode + "\"");
             CJsonUniquePtr command(
                 cJSON_Parse(ActionCommand(executor.NewRequestId(), "set_mode").c_str()));
             cJSON_AddStringToObject(cJSON_GetObjectItemCaseSensitive(command.get(), "args"), "mode",
                                     mode.c_str());
             return executor.Submit(lamp::Encode(command.get()));
         });
-    mcp.AddTool(
-        "self.lamp.restore_home",
-        "Return to the current mode's standard posture while keeping the current Yaw. Use it to "
-        "recover after hand guidance left the arm outside its mode envelope, or after an 'outside "
-        "mode' rejection. Does not change mode, does not need calibration, and does not enable "
-        "torque. Receipt is not completion; poll get_state with the task_id.",
-        PropertyList(), [&executor](const PropertyList&) -> ReturnValue {
-            return executor.Submit(ActionCommand(executor.NewRequestId(), "restore_home"));
-        });
+    mcp.AddTool("self.lamp.restore_home",
+                "回到当前模式的标准姿态，保留当前 yaw。用于手掰后越出模式包络，或收到"
+                "「Current pose outside mode」拒绝后的恢复。不换模式、不需要标定、不使能。",
+                PropertyList(), [&executor](const PropertyList&) -> ReturnValue {
+                    return executor.Submit(ActionCommand(executor.NewRequestId(), "restore_home"));
+                });
     mcp.AddTool(
         "self.lamp.get_state",
-        "Without IDs, return a cached simulator state with availability. bridge_request_id polls a "
-        "receipt; "
-        "task_id queues a fresh get_task query and returns its bridge_request_id. "
-        "Poll the query receipt to get actual task status. Only completed/limited confirms "
-        "simulation completion, never hardware arrival.",
+        "读取当前状态、轮询回执或查询单个任务。不带参数返回缓存状态；bridge_request_id 读凭据；"
+        "task_id 查询该任务。status 为 completed 或 limited 才表示硬件确认到位，accepted、running "
+        "都不算。",
         PropertyList(
             {Property("bridge_request_id", kPropertyTypeString, std::string()).SetMaxLength(96),
              Property("task_id", kPropertyTypeString, std::string()).SetMaxLength(96)}),
@@ -682,9 +648,8 @@ void RegisterLampTools(LampActionExecutor& executor) {
         });
     mcp.AddTool(
         "self.lamp.stop",
-        "Priority cancellation; preserve pose/support torque, not teaching or torque release. "
-        "Optional task_id only cancels that task. Cancellation queued is not confirmation of "
-        "stopped motion. Do not replay cancelled expressions.",
+        "高优先级取消正在执行或排队的运动，保持姿态与支撑力矩，不卸力、不进入示教。"
+        "回执不等于已停止。已取消的表达不要补播。",
         PropertyList({Property("task_id", kPropertyTypeString, std::string()).SetMaxLength(96)}),
         [&executor](const PropertyList& args) -> ReturnValue {
             return executor.Submit(lamp::Query("cancel", executor.NewRequestId(),
@@ -692,18 +657,11 @@ void RegisterLampTools(LampActionExecutor& executor) {
         });
     mcp.AddTool(
         "self.lamp.execute_action",
-        "Submit ONE lamp-action/2 execute command as a complete JSON envelope. The exact shape "
-        "is {protocol_version:'lamp-action/2',request_id:'unique-stable-id',operation:'execute',"
-        "args:{action_id:'execute_primitive',skill_id:'A01'|...|'A16',target_id?:'user'|'book',"
-        "options?:{...}}}. skill_id names the primitive; action_id is always "
-        "'execute_primitive'; every option goes INSIDE options. No 'skill', 'hold_mode', or "
-        "other fields at the top level. Only semantic args; A10 allows "
-        "options.hold_mode=holding with a calibrated target, e.g. "
-        "{protocol_version:'lamp-action/2',request_id:'light-on',operation:'execute',args:{"
-        "action_id:'execute_primitive',skill_id:'A10',target_id:'user',options:{hold_mode:'holding'"
-        "}}}. "
-        "End a held light via end_lighting or stop. Returns a receipt, not completion; query "
-        "get_state.",
+        "提交一条 execute 命令的完整信封：{protocol_version:'lamp-action/2',request_id:'唯一',"
+        "operation:'execute',args:{action_id:'execute_primitive',skill_id:'A01'..'B02',"
+        "target_id?:'user'|'book',options?:{...}}}。skill_id 只能用 list_primitives 里真实存在的"
+        "13 个；需要目标的原语必须带 target_id；所有选项放在 options 内，不能放顶层。"
+        "A10 的 options.hold_mode=holding 只作单条执行，结束用 end_lighting。回执不等于到位。",
         PropertyList(
             {Property("action_json", kPropertyTypeString).SetMaxLength(lamp::kMaxCommandBytes)}),
         [&executor](const PropertyList& args) -> ReturnValue {
@@ -721,42 +679,34 @@ void RegisterLampTools(LampActionExecutor& executor) {
                 PropertyList(), [&executor](const PropertyList&) -> ReturnValue {
                     return executor.Submit(lamp::Query("end_lighting", executor.NewRequestId()));
                 });
-    mcp.AddTool(
-        "self.lamp.rest",
-        "Goodbye/go rest: cancel old motion, move to standard sit, THEN release torque. "
-        "On confirmed completion this device closes the chat after speech and awaits wake word. "
-        "Receipt is not completion; do not close chat before sit succeeds. On wake enable_torque "
-        "then stand. "
-        "For manual adjustment use release_torque instead, without sitting.",
-        PropertyList(), [&executor](const PropertyList&) -> ReturnValue {
-            return executor.Submit(lamp::Query("rest", executor.NewRequestId()));
-        });
+    mcp.AddTool("self.lamp.rest",
+                "去休息：取消旧动作，回到标准 sit，确认到位后才卸力，随后关闭会话等待唤醒。"
+                "回执不等于已休息，必须等 sit 成功再结束对话。下次唤醒先 enable_torque 再站起。"
+                "只想手动掰动用 release_torque，不坐下。",
+                PropertyList(), [&executor](const PropertyList&) -> ReturnValue {
+                    return executor.Submit(lamp::Query("rest", executor.NewRequestId()));
+                });
     mcp.AddTool(
         "self.lamp.release_torque",
-        "User says don't resist/let me move you/calibrate: immediately cancel motion and "
-        "release torque IN PLACE, never sit first. Suppress dialogue motion while unloaded. "
-        "User manually aims, then explicitly asks record_calibration. This executor simulates "
-        "torque only.",
+        "原地卸力并取消运动，不回到坐姿。用户说别用力、让我自己掰、要示教、要校准时立即调用。"
+        "卸力期间不要执行动作或自动配动作。用户手摆对准并明确说记录时，再用 record_calibration。",
         PropertyList(), [&executor](const PropertyList&) -> ReturnValue {
             return executor.Submit(TorqueCommand(executor.NewRequestId(), false));
         });
     mcp.AddTool(
         "self.lamp.enable_torque",
-        "On a new wake after rest or user's explicit finish-adjusting, enable support at "
-        "CURRENT measured pose, never restore an old target. Does not move or stand up. "
-        "Do not automatically enable during teaching. accepted is NOT enabled: poll get_state "
-        "with its task_id and wait for completed before run_sequence. Enable once, not before "
-        "every successful action; if failed, inspect the reason instead of blindly retrying.",
+        "在实测位置使能支撑力矩，不移动、不站起、不回到旧目标。用于再次唤醒后，或用户明确说"
+        "掰好了。示教中不要自动使能。accepted 不等于已使能：用 task_id 轮询 get_state 到 completed "
+        "再发动作。只使能一次，不要每个动作前都调。",
         PropertyList(), [&executor](const PropertyList&) -> ReturnValue {
             return executor.Submit(TorqueCommand(executor.NewRequestId(), true));
         });
     mcp.AddTool(
         "self.lamp.record_calibration",
-        "Only after user has manually aimed and explicitly says record: store current measured "
-        "joint pose as user(face) or book aim in CURRENT mode and placement. Requires torque "
-        "released and idle. sit:user; stand:user/book; work:book. Does not move or re-enable. "
-        "Saved persistently in Web simulator now; future hardware executor stores locally on "
-        "ESP32.",
+        "仅在用户已手摆对准并明确说记录时调用：把当前实测姿态保存为当前模式的 user（人脸）或 "
+        "book（书本）目标，写入 NVS。要求已卸力且空闲。sit 只认 user，stand 认 user/book，work "
+        "只认 "
+        "book。不移动、不使能、不猜坐标。",
         PropertyList({Property("target_id", kPropertyTypeString).SetMaxLength(8)}),
         [&executor](const PropertyList& args) -> ReturnValue {
             const auto target = args["target_id"].value<std::string>();

@@ -497,8 +497,11 @@ Pose Plan::At(double seconds) const {
     }
     return q;
 }
-Plan Build(const Configuration& config, int mode, const Pose& current, const cJSON* step,
+Plan Build(const Configuration& config, int mode, const Pose& measured, const cJSON* step,
            bool dialogue) {
+    // Work on a mutable copy: a dialogue expression may first recover to the mode
+    // home, and everything downstream must plan from that recovered pose.
+    Pose current = measured;
     Plan plan;
     plan.entry = current;
     plan.reference = current;
@@ -576,8 +579,22 @@ Plan Build(const Configuration& config, int mode, const Pose& current, const cJS
         const bool yaw_adjust =
             action == "adjust_pose" && (Text(step, "direction") == "yaw_positive" ||
                                         Text(step, "direction") == "yaw_negative");
-        if (!yaw_adjust && !InMode(current, profile))
-            throw std::runtime_error("Current pose outside mode; restore Home first");
+        if (!yaw_adjust && !InMode(current, profile)) {
+            // A spoken reply must still produce a visible reaction. When hand
+            // guidance left the arm outside this mode's envelope, return to the mode
+            // home at the CURRENT Yaw first, then plan the expression from there.
+            if (!dialogue || !Safe(measured, config.obstacles))
+                throw std::runtime_error("Current pose outside mode; restore Home first");
+            auto home = profile.home;
+            home[0] = current[0];
+            if (!Path(current, home, config.obstacles))
+                throw std::runtime_error("No safe route back to the mode home");
+            plan.phases.push_back(Move(current, home, 0.9));
+            plan.limited = true;
+            current = home;
+            plan.reference = home;
+            plan.prepare = home;
+        }
         if (action == "adjust_pose" || action == "gaze_calibrated") {
             auto target = current;
             if (action == "gaze_calibrated")
