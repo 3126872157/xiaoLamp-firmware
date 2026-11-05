@@ -19,6 +19,7 @@ constexpr double kPi = std::numbers::pi, kDeg = kPi / 180;
 // A spoken reaction is deliberately quieter than an explicit request: the same
 // primitive at full amplitude reads as a command, not as a mannerism.
 constexpr double kDialogueIntensity = .6;
+constexpr double kDialogueNodIntensity = .8;
 const char* kModes[] = {"sit", "stand", "work"};
 const char* kTargets[] = {"user", "book"};
 const cJSON* Item(const cJSON* o, const char* k) { return cJSON_GetObjectItemCaseSensitive(o, k); }
@@ -781,7 +782,9 @@ Plan Build(const Configuration& config, int mode, const Pose& measured, const cJ
         // Dialogue plays the same primitive at reduced amplitude; the ceiling is
         // also the limit of the safety search, so a constrained path can only get
         // quieter, never louder than a mannerism.
-        const double ceiling = dialogue ? kDialogueIntensity : 1.;
+        const double ceiling = dialogue
+                                   ? (skill == "A01" ? kDialogueNodIntensity : kDialogueIntensity)
+                                   : 1.;
         plan.scale = ceiling;
         if (!safe(ceiling)) {
             if (skill == "A09" || skill == "A10" || skill == "A15" || !safe(0))
