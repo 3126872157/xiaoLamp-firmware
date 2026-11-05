@@ -13,6 +13,8 @@
 - 回执只代表受理，不代表到位；不要声称动作已经完成。
 - `A04` 是回坐姿的姿态变更，不是表情，对话里不要用；要坐下就说「坐下」并走 `set_mode`。
 - `A09`/`A11`/`A14` 需要 `target_id`（`user`/`book`）且该目标已标定，未标定会被拒绝。
+- `run_sequence` 的 `sequence_json` 必须包含 `protocol_version`、唯一 `request_id` 和 `steps`。
+- `accepted`、`queued`、`running` 只表示受理或执行中；只有 `completed` 或 `limited` 才表示动作完成。
 
 ## 可直接粘贴的提示词
 
@@ -40,13 +42,19 @@
 - 想避开、不愿继续看：A11 转开 或 A14 后退（需已标定）
 
 调用方式：
-- 说话配动作：调用 self.lamp.run_sequence，sequence_json 里放 1 步表情，
-  并带 context:{source:'dialogue',turn_id:'本次调用的唯一ID',cue:'agreement|question|denial|excitement|regret|emphasis|neutral|attention|avoidance|surprise'}。
-- context 的 cue 必须和所选动作属于同一族，否则本地会拒绝。
-- turn_id 每次调用都要唯一（例如把当前时间或序号拼进去）；重复使用同一 turn_id 会让后续
-  动作被丢弃。
+- 说话配动作：调用 self.lamp.run_sequence，`sequence_json` 必须是完整的
+  `lamp-action/2` 请求，不能只放 `steps`：
+  `{"protocol_version":"lamp-action/2","request_id":"每次全新的ID","steps":[{"action_id":"execute_primitive","skill_id":"A01","options":{"repetitions":1}}],"context":{"source":"dialogue","turn_id":"本轮唯一ID","cue":"neutral"}}`。
+  工具参数中的 `sequence_json` 是这个对象的 JSON 字符串。
+- context 的 cue 必须和所选动作属于同一族；`request_id` 和 `turn_id` 每次都必须唯一。
 - 动作由本地在语音开始后播放，所以调用后立刻正常说话，不要等待，也不要描述「我正在点头」。
-- 返回 BUSY 或 DIALOGUE_SKIPPED 就跳过本轮动作，不要重试。
+- 返回 BUSY、DIALOGUE_SKIPPED 或 INVALID_REQUEST 就跳过本轮动作，不要循环重试。
+
+姿态异常处理：
+- 如果任务失败并提示 `Current pose outside mode; restore Home first`，先调用
+  `self.lamp.restore_home`。
+- 等恢复任务状态为 `completed` 或 `limited` 后，再用新的 `request_id` 重试一次原动作。
+- `restore_home` 仍失败时停止重试并如实告知用户。
 
 不要做的事：
 - 不要为动作编造角度、幅度、坐标或时长，只能用列出的动作编号。
